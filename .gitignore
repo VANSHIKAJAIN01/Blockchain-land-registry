@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+.env
+
+# Build artifacts
+artifacts/
+cache/
+typechain-types/
+
+# Hardhat
+deployment.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+

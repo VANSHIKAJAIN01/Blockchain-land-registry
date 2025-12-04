@@ -1,0 +1,29 @@
+{
+  "name": "blockchain-land-registry",
+  "version": "1.0.0",
+  "description": "Blockchain-based Land Registry System",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy": "hardhat run scripts/deploy.js --network localhost",
+    "setup-roles": "hardhat run scripts/setup-roles.js --network localhost"
+  },
+  "keywords": [
+    "blockchain",
+    "ethereum",
+    "land-registry",
+    "smart-contracts"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.19.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
+
