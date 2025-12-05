@@ -352,22 +352,6 @@ function App() {
                   </div>
                 </div>
               </div>
-              <div className="wallet-balance-section" style={{ background: 'rgba(255, 255, 255, 0.15)', padding: '0.75rem 1rem', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
-                <div className="balance-info">
-                  <span className="balance-label">Balance</span>
-                  <div className="balance-value-container">
-                    <span className="balance-value">{parseFloat(balance).toFixed(4)} ETH</span>
-                    <button 
-                      onClick={() => loadBalance(account, provider)} 
-                      className="refresh-balance-btn" 
-                      title="Refresh balance"
-                      style={{ background: 'rgba(255, 255, 255, 0.2)', border: 'none', color: 'white', padding: '0.25rem 0.5rem', borderRadius: '4px', cursor: 'pointer', marginLeft: '0.5rem' }}
-                    >
-                      <FiRefreshCw style={{ fontSize: '0.9rem' }} />
-                    </button>
-                  </div>
-                </div>
-              </div>
               <div className="role-section">
                 <div className="role-badge-header" style={{ backgroundColor: ROLE_INFO[userRole]?.color || '#999' }}>
                   <span className="role-icon-header">{ROLE_INFO[userRole]?.icon || '👤'}</span>
@@ -615,12 +599,6 @@ function Dashboard({ account, userRole, properties, balance, onTabChange }) {
           <h3>My Role</h3>
           <p className="stat-value">{userRole || 'No Role'}</p>
           <p className="stat-label">{roleInfo.description}</p>
-        </div>
-        <div className="stat-card" style={{ background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' }}>
-          <FiShield className="stat-icon" />
-          <h3>Wallet Balance</h3>
-          <p className="stat-value">{parseFloat(balance || '0').toFixed(4)} ETH</p>
-          <p className="stat-label">{account.substring(0, 6)}...{account.substring(38)}</p>
         </div>
       </div>
 
