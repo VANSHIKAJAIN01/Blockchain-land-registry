@@ -19,8 +19,20 @@ import {
   FiBell
 } from 'react-icons/fi';
 import './App.css';
+import PropertyRegistryABI from './PropertyRegistryABI.json';
 
 const API_URL = 'http://localhost:3001/api';
+const CONTRACT_ADDRESS = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+
+// UserRole enum values from contract (for reference, used in contract calls)
+// const UserRole = {
+//   None: 0,
+//   Seller: 1,
+//   Buyer: 2,
+//   Registrar: 3,
+//   Municipal: 4,
+//   Broker: 5
+// };
 
 // Role descriptions and responsibilities
 const ROLE_INFO = {
@@ -94,10 +106,10 @@ const ROLE_INFO = {
 function App() {
   const [account, setAccount] = useState('');
   const [provider, setProvider] = useState(null);
+  const [signer, setSigner] = useState(null);
+  const [contract, setContract] = useState(null);
   const [userRole, setUserRole] = useState('');
   const [properties, setProperties] = useState([]);
-  const [transfers, setTransfers] = useState([]);
-  const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showRoleInfo, setShowRoleInfo] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -132,8 +144,15 @@ function App() {
         setAccount(accounts[0]);
         const providerInstance = new ethers.BrowserProvider(window.ethereum);
         setProvider(providerInstance);
+        
+        // Get signer and create contract instance
+        const signerInstance = await providerInstance.getSigner();
+        setSigner(signerInstance);
+        const contractInstance = new ethers.Contract(CONTRACT_ADDRESS, PropertyRegistryABI.abi, signerInstance);
+        setContract(contractInstance);
+        
         await loadBalance(accounts[0], providerInstance);
-        await loadUserRole(accounts[0]);
+        await loadUserRole(accounts[0], contractInstance);
         await loadUserProperties(accounts[0]);
         
         // Check for pending actions for all roles
@@ -143,8 +162,12 @@ function App() {
         window.ethereum.on('accountsChanged', async (newAccounts) => {
           if (newAccounts.length > 0) {
             setAccount(newAccounts[0]);
+            const newSigner = await providerInstance.getSigner();
+            setSigner(newSigner);
+            const newContract = new ethers.Contract(CONTRACT_ADDRESS, PropertyRegistryABI.abi, newSigner);
+            setContract(newContract);
             await loadBalance(newAccounts[0], providerInstance);
-            await loadUserRole(newAccounts[0]);
+            await loadUserRole(newAccounts[0], newContract);
             await loadUserProperties(newAccounts[0]);
             await checkRolePendingActions(newAccounts[0]);
           } else {
@@ -153,6 +176,8 @@ function App() {
             setUserRole('');
             setProperties([]);
             setBalance('0.0');
+            setSigner(null);
+            setContract(null);
           }
         });
 
@@ -169,20 +194,50 @@ function App() {
     }
   };
 
-  // Load user role
-  const loadUserRole = async (address) => {
+  // Load user role from contract
+  const loadUserRole = async (address, contractInstance = null) => {
     try {
-      const response = await fetch(`${API_URL}/users/${address}/role`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      const contractToUse = contractInstance || contract;
+      if (!contractToUse) {
+        console.warn('Contract not initialized');
+        setUserRole('');
+        return;
       }
-      const data = await response.json();
-      setUserRole(data.role);
+      
+      const roleId = await contractToUse.userRoles(address);
+      const roleNames = ['None', 'Seller', 'Buyer', 'Registrar', 'Municipal', 'Broker'];
+      setUserRole(roleNames[roleId] || 'None');
     } catch (error) {
       console.error('Error loading role:', error);
-      // Set empty role if API fails
       setUserRole('');
-      alert('Warning: Could not load user role. Make sure backend is running on port 3001.');
+      // Try fallback to backend API
+      try {
+        const response = await fetch(`${API_URL}/users/${address}/role`);
+        if (response.ok) {
+          const data = await response.json();
+          setUserRole(data.role);
+        }
+      } catch (apiError) {
+        console.error('Backend API also failed:', apiError);
+      }
+    }
+  };
+  
+  // Verify user has required role
+  const verifyRole = async (requiredRole, accountAddress = null) => {
+    const addressToCheck = accountAddress || account;
+    if (!addressToCheck || !contract) {
+      return false;
+    }
+    
+    try {
+      const roleId = await contract.userRoles(addressToCheck);
+      const roleNames = ['None', 'Seller', 'Buyer', 'Registrar', 'Municipal', 'Broker'];
+      const currentRole = roleNames[roleId] || 'None';
+      return currentRole === requiredRole;
+    } catch (error) {
+      console.error('Error verifying role:', error);
+      return false;
     }
   };
 
@@ -438,6 +493,10 @@ function App() {
                 userRole={userRole}
                 uploadFile={uploadFile}
                 provider={provider}
+                contract={contract}
+                signer={signer}
+                verifyRole={verifyRole}
+                loadBalance={loadBalance}
                 onPropertiesUpdate={() => loadUserProperties(account)}
                 addNotification={addNotification}
               />
@@ -447,6 +506,11 @@ function App() {
                 uploadFile={uploadFile} 
                 account={account} 
                 userRole={userRole}
+                contract={contract}
+                signer={signer}
+                provider={provider}
+                verifyRole={verifyRole}
+                addNotification={addNotification}
                 onPropertyRegistered={() => loadUserProperties(account)}
               />
             )}
@@ -779,7 +843,7 @@ function Properties({ properties, account, userRole }) {
 }
 
 // Transfers Component
-function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate, addNotification }) {
+function Transfers({ account, userRole, uploadFile, provider, contract, signer, verifyRole, loadBalance, onPropertiesUpdate, addNotification }) {
   const [transactionHash, setTransactionHash] = useState(null);
   const [transactionDetails, setTransactionDetails] = useState(null);
   const [loadingTx, setLoadingTx] = useState(false);
@@ -790,25 +854,10 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
     broker: '',
     file: null
   });
-  const [pendingTransfers, setPendingTransfers] = useState([]);
   const [viewTransferId, setViewTransferId] = useState('');
   const [transferDetails, setTransferDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [viewingTransfer, setViewingTransfer] = useState(false);
-  // Always use Backend API (no checkbox needed)
-  const useBackendAPI = true;
-  
-  // Contract address (from deployment.json)
-  const CONTRACT_ADDRESS = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
-  
-  // Minimal ABI for role-based actions
-  const CONTRACT_ABI = [
-    "function brokerVerify(uint256 _transferId) external",
-    "function registrarVerify(uint256 _transferId) external",
-    "function municipalApprove(uint256 _transferId) external",
-    "function cancelTransfer(uint256 _transferId) external",
-    "function buyerAccept(uint256 _transferId, string memory _buyerDocumentsHash) external"
-  ];
 
   useEffect(() => {
     if (account) {
@@ -821,39 +870,133 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
     e.preventDefault();
     setLoading(true);
 
+    if (!contract || !signer || !account) {
+      alert('Please connect your MetaMask wallet first');
+      setLoading(false);
+      return;
+    }
+
     try {
+      // Validate property ID
+      if (!transferForm.propertyId || transferForm.propertyId.trim() === '') {
+        throw new Error('Please enter a valid Property ID');
+      }
+      
+      const propertyId = parseInt(transferForm.propertyId);
+      if (isNaN(propertyId) || propertyId <= 0) {
+        throw new Error('Property ID must be a positive number');
+      }
+
       // Upload document first
       const ipfsHash = await uploadFile(transferForm.file);
 
-      // Initiate transfer
-      const response = await fetch(`${API_URL}/transfers/initiate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          propertyId: transferForm.propertyId,
-          buyer: transferForm.buyer,
-          price: transferForm.price,
-          broker: transferForm.broker,
-          documentsHash: ipfsHash
-        })
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        const message = `Transfer initiated successfully! Transfer ID: ${data.transferId}`;
-        alert(message);
-        addNotification(message, 'success');
-        
-        // Notify broker if broker address is provided
-        if (transferForm.broker) {
-          addNotification(`Broker ${transferForm.broker.substring(0, 10)}... has been notified to verify this transfer.`, 'info');
+      // Verify property ownership (contract allows Seller role OR property owner)
+      let property;
+      try {
+        property = await contract.getProperty(propertyId);
+      } catch (error) {
+        if (error.code === 'BAD_DATA' || error.message.includes('decode')) {
+          throw new Error(`Property with ID ${propertyId} does not exist. Please register the property first.`);
         }
-        
-        setTransferForm({ propertyId: '', buyer: '', price: '', broker: '', file: null });
+        throw error;
+      }
+      
+      // Check if property is active
+      if (!property.isActive) {
+        throw new Error('This property is not active');
+      }
+      
+      // Verify ownership
+      if (property.currentOwner.toLowerCase() !== account.toLowerCase()) {
+        throw new Error(`You must own this property to initiate a transfer. Current owner: ${property.currentOwner}`);
+      }
+      
+      // Optional: Check if user has Seller role (for better UX, but not required)
+      const hasSellerRole = await verifyRole('Seller');
+      if (!hasSellerRole) {
+        console.log('Note: User does not have Seller role, but owns the property - transfer will proceed');
+      }
+
+      // Validate buyer address
+      if (!ethers.isAddress(transferForm.buyer)) {
+        throw new Error('Invalid buyer address');
+      }
+      
+      // Normalize addresses for comparison
+      const buyerAddress = ethers.getAddress(transferForm.buyer);
+      const sellerAddress = ethers.getAddress(account);
+      
+      // Check that buyer is not the same as seller
+      if (buyerAddress.toLowerCase() === sellerAddress.toLowerCase()) {
+        throw new Error('Buyer cannot be the same as seller. You cannot transfer property to yourself.');
+      }
+      
+      // Validate broker address (if provided)
+      let brokerAddress = ethers.ZeroAddress;
+      if (transferForm.broker && transferForm.broker.trim() !== '') {
+        if (!ethers.isAddress(transferForm.broker)) {
+          throw new Error('Invalid broker address');
+        }
+        const normalizedBroker = ethers.getAddress(transferForm.broker);
+        // Check that broker is not the same as seller or buyer
+        if (normalizedBroker.toLowerCase() === sellerAddress.toLowerCase()) {
+          throw new Error('Broker cannot be the same as seller');
+        }
+        if (normalizedBroker.toLowerCase() === buyerAddress.toLowerCase()) {
+          throw new Error('Broker cannot be the same as buyer');
+        }
+        brokerAddress = normalizedBroker;
+      }
+
+      // Initiate transfer via MetaMask
+      const priceInWei = ethers.parseEther(transferForm.price.toString());
+      addNotification('⏳ Submitting transaction to MetaMask...', 'info');
+      
+      const tx = await contract.initiateTransfer(
+        propertyId,
+        transferForm.buyer,
+        priceInWei,
+        brokerAddress,
+        ipfsHash
+      );
+
+      // Wait for confirmation
+      addNotification('⏳ Waiting for transaction confirmation...', 'info');
+      const receipt = await tx.wait();
+      
+      // Get transfer ID from event
+      const transferId = receipt.logs.find(log => {
+        try {
+          const parsed = contract.interface.parseLog(log);
+          return parsed && parsed.name === 'TransferInitiated';
+        } catch {
+          return false;
+        }
+      })?.args?.transferId?.toString() || 'N/A';
+
+      const message = `Transfer initiated successfully! Transfer ID: ${transferId}`;
+      alert(message);
+      addNotification(message, 'success');
+      
+      // Notify broker if broker address is provided
+      if (brokerAddress !== ethers.ZeroAddress) {
+        addNotification(`Broker ${brokerAddress.substring(0, 10)}... has been notified to verify this transfer.`, 'info');
+      }
+      
+      setTransferForm({ propertyId: '', buyer: '', price: '', broker: '', file: null });
+      
+      // Reload balance
+      if (account && provider) {
+        await loadBalance(account, provider);
       }
     } catch (error) {
       console.error('Error:', error);
-      alert('Error initiating transfer: ' + error.message);
+      let errorMessage = error.message || 'Unknown error';
+      if (errorMessage.includes('user rejected')) {
+        errorMessage = 'Transaction was rejected by user';
+      }
+      alert('Error initiating transfer: ' + errorMessage);
+      addNotification('❌ ' + errorMessage, 'error');
     } finally {
       setLoading(false);
     }
@@ -861,130 +1004,307 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
 
   const loadTransferDetails = async (transferId) => {
     try {
-      const response = await fetch(`${API_URL}/transfers/${transferId}`);
-      const data = await response.json();
-      setTransferDetails(data);
+      // Validate transfer ID
+      if (!transferId || transferId.trim() === '') {
+        throw new Error('Please enter a valid Transfer ID');
+      }
+      
+      const transferIdNum = parseInt(transferId);
+      if (isNaN(transferIdNum) || transferIdNum <= 0) {
+        throw new Error('Transfer ID must be a positive number');
+      }
+
+      if (!contract) {
+        // Fallback to backend API if contract not available
+        const response = await fetch(`${API_URL}/transfers/${transferIdNum}`);
+        if (!response.ok) {
+          throw new Error(`Transfer with ID ${transferIdNum} does not exist`);
+        }
+        const data = await response.json();
+        setTransferDetails(data);
+        setViewingTransfer(true);
+        return;
+      }
+      
+      // Load from contract directly
+      let transfer;
+      try {
+        transfer = await contract.getTransferRequest(transferIdNum);
+      } catch (error) {
+        if (error.code === 'BAD_DATA' || error.message.includes('decode')) {
+          throw new Error(`Transfer with ID ${transferIdNum} does not exist. Please check the Transfer ID and try again.`);
+        }
+        throw error;
+      }
+      
+      const statusMap = {
+        0: 'Initiated',
+        1: 'BrokerVerified',
+        2: 'RegistrarVerified',
+        3: 'MunicipalApproved',
+        4: 'BuyerAccepted',
+        5: 'Completed',
+        6: 'Cancelled',
+        7: 'Rejected'
+      };
+      
+      setTransferDetails({
+        transferId: transfer.transferId.toString(),
+        propertyId: transfer.propertyId.toString(),
+        seller: transfer.seller,
+        buyer: transfer.buyer,
+        price: ethers.formatEther(transfer.price),
+        documentsHash: transfer.documentsHash,
+        buyerDocumentsHash: transfer.buyerDocumentsHash,
+        status: statusMap[transfer.status] || 'Unknown',
+        broker: transfer.broker,
+        brokerVerified: transfer.brokerVerified,
+        registrarVerified: transfer.registrarVerified,
+        municipalApproved: transfer.municipalApproved,
+        buyerAccepted: transfer.buyerAccepted,
+        rejectionReason: transfer.rejectionReason || '',
+        rejectedBy: transfer.rejectedBy || null,
+        createdAt: transfer.createdAt.toString(),
+        completedAt: transfer.completedAt.toString()
+      });
       setViewingTransfer(true);
     } catch (error) {
       console.error('Error loading transfer:', error);
-      alert('Error loading transfer details');
+      // Fallback to backend API
+      try {
+        const response = await fetch(`${API_URL}/transfers/${transferId}`);
+        const data = await response.json();
+        setTransferDetails(data);
+        setViewingTransfer(true);
+      } catch (apiError) {
+        alert('Error loading transfer details');
+      }
     }
   };
 
   const handleAction = async (action, transferId, file = null, reason = null) => {
-    // Always use backend API
-    return handleActionViaBackend(action, transferId, file, reason);
+    return handleActionViaMetaMask(action, transferId, file, reason);
   };
 
-  // Handle actions via backend API (no MetaMask popup)
-  const handleActionViaBackend = async (action, transferId, file = null, reason = null) => {
+  // Handle actions via MetaMask (with role verification)
+  const handleActionViaMetaMask = async (action, transferId, file = null, reason = null) => {
+    if (!contract || !signer || !account) {
+      alert('Please connect your MetaMask wallet first');
+      return;
+    }
+
     setLoading(true);
     try {
-      let endpoint = '';
-      let formData = null;
-      let body = null;
+      // Validate transfer ID
+      const transferIdNum = parseInt(transferId);
+      if (isNaN(transferIdNum) || transferIdNum <= 0) {
+        throw new Error('Invalid Transfer ID');
+      }
       
+      // Get transfer details first to verify permissions
+      let transfer;
+      try {
+        transfer = await contract.getTransferRequest(transferIdNum);
+      } catch (error) {
+        if (error.code === 'BAD_DATA' || error.message.includes('decode')) {
+          throw new Error(`Transfer with ID ${transferIdNum} does not exist. Please check the Transfer ID and try again.`);
+        }
+        throw error;
+      }
+      
+      let tx;
+      let buyerDocumentsHash = '';
+      let priceInWei = null; // For buyerAccept action
+      
+      // Helper function to get status as number
+      const getStatusValue = (status) => {
+        if (status === null || status === undefined) {
+          return -1;
+        }
+        // Handle BigNumber or object with toString
+        if (typeof status === 'object' && status.toString) {
+          const num = Number(status.toString());
+          return isNaN(num) ? -1 : num;
+        }
+        // Handle number or string
+        const num = typeof status === 'string' ? parseInt(status, 10) : Number(status);
+        return isNaN(num) ? -1 : num;
+      };
+      
+      // Verify role and permissions before executing
+      // Note: Status validation is handled by the contract itself
       switch (action) {
         case 'brokerVerify':
-          endpoint = `${API_URL}/transfers/${transferId}/broker-verify`;
+          // Verify user is Broker and is the assigned broker
+          const hasBrokerRole = await verifyRole('Broker');
+          if (!hasBrokerRole) {
+            throw new Error('You must have Broker role to verify transfers');
+          }
+          if (transfer.broker.toLowerCase() !== account.toLowerCase()) {
+            throw new Error('You are not the assigned broker for this transfer');
+          }
+          // Let contract validate status - it will throw a clear error if status is wrong
+          // Frontend status check removed to avoid enum conversion issues
+          tx = await contract.brokerVerify(transferIdNum);
           break;
+          
         case 'brokerReject':
-          endpoint = `${API_URL}/transfers/${transferId}/broker-reject`;
-          if (reason) {
-            body = JSON.stringify({ reason: reason });
+          const hasBrokerRoleReject = await verifyRole('Broker');
+          if (!hasBrokerRoleReject) {
+            throw new Error('You must have Broker role to reject transfers');
           }
+          if (transfer.broker.toLowerCase() !== account.toLowerCase()) {
+            throw new Error('You are not the assigned broker for this transfer');
+          }
+          if (!reason || reason.trim().length === 0) {
+            throw new Error('Rejection reason is required');
+          }
+          tx = await contract.brokerReject(transferIdNum, reason.trim());
           break;
+          
         case 'registrarVerify':
-          endpoint = `${API_URL}/transfers/${transferId}/registrar-verify`;
+          const hasRegistrarRole = await verifyRole('Registrar');
+          if (!hasRegistrarRole) {
+            throw new Error('You must have Registrar role to verify transfers');
+          }
+          // Let contract validate status - it will throw a clear error if status is wrong
+          tx = await contract.registrarVerify(transferIdNum);
           break;
+          
         case 'registrarReject':
-          endpoint = `${API_URL}/transfers/${transferId}/registrar-reject`;
-          if (reason) {
-            body = JSON.stringify({ reason: reason });
+          const hasRegistrarRoleReject = await verifyRole('Registrar');
+          if (!hasRegistrarRoleReject) {
+            throw new Error('You must have Registrar role to reject transfers');
           }
+          if (!reason || reason.trim().length === 0) {
+            throw new Error('Rejection reason is required');
+          }
+          tx = await contract.registrarReject(transferIdNum, reason.trim());
           break;
+          
         case 'municipalApprove':
-          endpoint = `${API_URL}/transfers/${transferId}/municipal-approve`;
+          const hasMunicipalRole = await verifyRole('Municipal');
+          if (!hasMunicipalRole) {
+            throw new Error('You must have Municipal role to approve transfers');
+          }
+          // Let contract validate status - it will throw a clear error if status is wrong
+          tx = await contract.municipalApprove(transferIdNum);
           break;
+          
         case 'municipalReject':
-          endpoint = `${API_URL}/transfers/${transferId}/municipal-reject`;
-          if (reason) {
-            body = JSON.stringify({ reason: reason });
+          const hasMunicipalRoleReject = await verifyRole('Municipal');
+          if (!hasMunicipalRoleReject) {
+            throw new Error('You must have Municipal role to reject transfers');
           }
+          if (!reason || reason.trim().length === 0) {
+            throw new Error('Rejection reason is required');
+          }
+          tx = await contract.municipalReject(transferIdNum, reason.trim());
           break;
+          
         case 'buyerAccept':
-          endpoint = `${API_URL}/transfers/${transferId}/buyer-accept`;
-          if (file) {
-            formData = new FormData();
-            formData.append('file', file);
+          // Verify user is the buyer
+          if (transfer.buyer.toLowerCase() !== account.toLowerCase()) {
+            throw new Error('Only the assigned buyer can accept this transfer');
           }
+          // Let contract validate status - it will throw a clear error if status is wrong
+          if (!file) {
+            throw new Error('Buyer documents file required');
+          }
+          
+          // Upload buyer documents first
+          buyerDocumentsHash = await uploadFile(file);
+          
+          // Call buyerAccept with ETH value
+          // transfer.price is a BigNumber, convert it properly
+          if (typeof transfer.price === 'bigint') {
+            priceInWei = transfer.price;
+          } else if (transfer.price && typeof transfer.price === 'object' && transfer.price.toString) {
+            // Use ethers to handle BigNumber conversion
+            priceInWei = ethers.parseUnits(transfer.price.toString(), 0);
+          } else {
+            priceInWei = ethers.parseEther(transfer.price.toString());
+          }
+          tx = await contract.buyerAccept(transferIdNum, buyerDocumentsHash, {
+            value: priceInWei
+          });
           break;
+          
         case 'cancel':
-          endpoint = `${API_URL}/transfers/${transferId}/cancel`;
+          // Verify user is the seller
+          if (transfer.seller.toLowerCase() !== account.toLowerCase()) {
+            throw new Error('Only the seller can cancel this transfer');
+          }
+          tx = await contract.cancelTransfer(transferIdNum);
           break;
+          
         default:
           setLoading(false);
           return;
       }
 
-      const options = {
-        method: 'POST',
-        headers: {}
-      };
+      // Wait for transaction confirmation
+      addNotification('⏳ Transaction submitted. Waiting for confirmation...', 'info');
+      const receipt = await tx.wait();
       
-      if (formData) {
-        // FormData - don't set Content-Type, browser will set it with boundary
-        options.body = formData;
-      } else if (body) {
-        // JSON body for rejections
-        options.headers['Content-Type'] = 'application/json';
-        options.body = body;
-      }
-
-      const response = await fetch(endpoint, options);
-      const data = await response.json();
+      const successMsg = `✅ Action completed successfully! Transaction Hash: ${receipt.hash}`;
+      alert(successMsg);
+      addNotification(successMsg, 'success');
       
-      if (data.success) {
-        const txHash = data.transactionHash;
-        const successMsg = `✅ Action completed successfully! Transaction Hash: ${txHash || 'N/A'}`;
-        alert(successMsg);
-        addNotification(successMsg, 'success');
-        
-        // Store transaction hash and fetch details
-        if (txHash && provider) {
-          setTransactionHash(txHash);
-          await fetchTransactionDetails(txHash, provider);
-        }
-        
-        // Show ETH transfer notification when buyer accepts
-        if (action === 'buyerAccept' && transferDetails && transferDetails.seller) {
-          const ethAmount = transferDetails.price || '0';
-          addNotification(`💰 ETH Transfer: ${ethAmount} ETH sent from buyer to seller`, 'success');
-          addNotification(`Seller ${transferDetails.seller.substring(0, 10)}... has been notified that the transfer has been completed.`, 'info');
-        }
-        
-        // Notify next role in workflow
-        if (action === 'brokerVerify' && transferDetails) {
-          addNotification('Registrar has been notified to verify this transfer.', 'info');
-        } else if (action === 'registrarVerify' && transferDetails) {
-          addNotification('Municipal office has been notified to approve this transfer.', 'info');
-        } else if (action === 'municipalApprove' && transferDetails) {
-          addNotification(`Buyer ${transferDetails.buyer.substring(0, 10)}... has been notified to accept this transfer.`, 'info');
-        }
-        
-        if (transferDetails) {
-          await loadTransferDetails(transferId);
-        }
-        // Reload properties if transfer was completed (ownership changed)
-        if (action === 'buyerAccept' && onPropertiesUpdate) {
-          await onPropertiesUpdate();
-        }
-      } else {
-        alert('❌ Error: ' + (data.error || 'Unknown error'));
+      // Store transaction hash and fetch details
+      if (receipt.hash && provider) {
+        setTransactionHash(receipt.hash);
+        await fetchTransactionDetails(receipt.hash, provider);
       }
+      
+      // Reload transfer details first to get updated state
+      await loadTransferDetails(transferIdNum.toString());
+      
+      // Show ETH transfer notification when buyer accepts
+      if (action === 'buyerAccept' && priceInWei) {
+        const ethAmount = ethers.formatEther(priceInWei);
+        addNotification(`💰 ETH Transfer: ${ethAmount} ETH sent from buyer to seller`, 'success');
+        if (transfer.seller) {
+          addNotification(`Seller ${transfer.seller.substring(0, 10)}... has been notified that the transfer has been completed.`, 'info');
+        }
+      }
+      
+      // Notify next role in workflow
+      if (action === 'brokerVerify') {
+        addNotification('Registrar has been notified to verify this transfer.', 'info');
+      } else if (action === 'registrarVerify') {
+        addNotification('Municipal office has been notified to approve this transfer.', 'info');
+      } else if (action === 'municipalApprove') {
+        if (transfer.buyer) {
+          addNotification(`Buyer ${transfer.buyer.substring(0, 10)}... has been notified to accept this transfer.`, 'info');
+        }
+      }
+      
+      // Reload properties if transfer was completed (ownership changed)
+      if (action === 'buyerAccept' && onPropertiesUpdate) {
+        await onPropertiesUpdate();
+      }
+      
+      // Reload balance after transaction
+      if (account && provider) {
+        await loadBalance(account, provider);
+      }
+      
     } catch (error) {
       console.error('Error:', error);
-      alert('❌ Error performing action: ' + error.message);
+      let errorMessage = error.message || 'Unknown error';
+      
+      // Provide user-friendly error messages
+      if (errorMessage.includes('user rejected')) {
+        errorMessage = 'Transaction was rejected by user';
+      } else if (errorMessage.includes('insufficient funds')) {
+        errorMessage = 'Insufficient funds for this transaction';
+      } else if (errorMessage.includes('Insufficient role permissions')) {
+        errorMessage = 'You do not have the required role to perform this action';
+      }
+      
+      alert('❌ Error: ' + errorMessage);
+      addNotification('❌ ' + errorMessage, 'error');
     } finally {
       setLoading(false);
     }
@@ -1896,7 +2216,7 @@ function RejectionForm({ transferId, onReject, loading, role }) {
 }
 
 // Register Property Component
-function RegisterProperty({ uploadFile, account, userRole, onPropertyRegistered }) {
+function RegisterProperty({ uploadFile, account, userRole, onPropertyRegistered, contract, signer, provider, verifyRole, addNotification }) {
   const [form, setForm] = useState({
     owner: '',
     propertyAddress: '',
@@ -1918,44 +2238,81 @@ function RegisterProperty({ uploadFile, account, userRole, onPropertyRegistered 
     e.preventDefault();
     setLoading(true);
 
+    if (!contract || !signer || !account) {
+      alert('Please connect your MetaMask wallet first');
+      setLoading(false);
+      return;
+    }
+
     try {
-      const ipfsHash = await uploadFile(form.file);
+      // Verify role: Seller or Registrar
+      if (userRole !== 'Seller' && userRole !== 'Registrar') {
+        throw new Error('You must have Seller or Registrar role to register properties');
+      }
 
       // For sellers, ensure owner is their own address
       const ownerAddress = (userRole === 'Seller') ? account : form.owner;
-
-      const response = await fetch(`${API_URL}/properties/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          owner: ownerAddress,
-          propertyAddress: form.propertyAddress,
-          propertyType: form.propertyType,
-          area: form.area,
-          ipfsHash: ipfsHash
-        })
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        alert('Property registered successfully! Property ID: ' + (data.propertyId || 'N/A'));
-        setForm({ 
-          owner: (userRole === 'Seller') ? account : '', 
-          propertyAddress: '', 
-          propertyType: 'Residential', 
-          area: '', 
-          file: null 
-        });
-        // Wait a moment for blockchain transaction to be confirmed, then refresh
-        setTimeout(async () => {
-          if (onPropertyRegistered) {
-            await onPropertyRegistered();
-          }
-        }, 1000);
+      
+      if (!ethers.isAddress(ownerAddress)) {
+        throw new Error('Invalid owner address');
       }
+
+      // If seller, verify they're registering for themselves
+      if (userRole === 'Seller' && ownerAddress.toLowerCase() !== account.toLowerCase()) {
+        throw new Error('Sellers can only register properties for themselves');
+      }
+
+      const ipfsHash = await uploadFile(form.file);
+
+      // Register property via MetaMask
+      addNotification('⏳ Submitting transaction to MetaMask...', 'info');
+      
+      const tx = await contract.registerProperty(
+        ownerAddress,
+        form.propertyAddress,
+        form.propertyType,
+        form.area,
+        ipfsHash
+      );
+
+      // Wait for confirmation
+      addNotification('⏳ Waiting for transaction confirmation...', 'info');
+      const receipt = await tx.wait();
+      
+      // Get property ID from event
+      const propertyId = receipt.logs.find(log => {
+        try {
+          const parsed = contract.interface.parseLog(log);
+          return parsed && parsed.name === 'PropertyRegistered';
+        } catch {
+          return false;
+        }
+      })?.args?.propertyId?.toString() || 'N/A';
+
+      alert('Property registered successfully! Property ID: ' + propertyId);
+      setForm({ 
+        owner: (userRole === 'Seller') ? account : '', 
+        propertyAddress: '', 
+        propertyType: 'Residential', 
+        area: '', 
+        file: null 
+      });
+      
+      // Wait a moment for blockchain transaction to be confirmed, then refresh
+      setTimeout(async () => {
+        if (onPropertyRegistered) {
+          await onPropertyRegistered();
+        }
+      }, 1000);
+      
+      // Balance will be reloaded automatically when needed
     } catch (error) {
       console.error('Error:', error);
-      alert('Error registering property: ' + (error.message || 'Unknown error'));
+      let errorMessage = error.message || 'Unknown error';
+      if (errorMessage.includes('user rejected')) {
+        errorMessage = 'Transaction was rejected by user';
+      }
+      alert('Error registering property: ' + errorMessage);
     } finally {
       setLoading(false);
     }
