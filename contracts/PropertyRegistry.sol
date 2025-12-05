@@ -16,7 +16,8 @@ contract PropertyRegistry {
         MunicipalApproved, // Municipal approved transfer
         BuyerAccepted,  // Buyer accepted transfer
         Completed,      // Transfer completed
-        Cancelled       // Transfer cancelled
+        Cancelled,      // Transfer cancelled
+        Rejected        // Transfer rejected by Broker, Registrar, or Municipal
     }
     
     // Structs
@@ -45,6 +46,8 @@ contract PropertyRegistry {
         bool registrarVerified;
         bool municipalApproved;
         bool buyerAccepted;
+        string rejectionReason; // Reason for rejection (if rejected)
+        address rejectedBy; // Address of the role that rejected the transfer
         uint256 createdAt;
         uint256 completedAt;
     }
@@ -89,6 +92,7 @@ contract PropertyRegistry {
     event BuyerAccepted(uint256 indexed transferId);
     event TransferCompleted(uint256 indexed transferId, uint256 indexed propertyId, address newOwner);
     event TransferCancelled(uint256 indexed transferId);
+    event TransferRejected(uint256 indexed transferId, address indexed rejectedBy, string reason);
     event RoleAssigned(address indexed user, UserRole role);
     
     // Modifiers
@@ -109,7 +113,8 @@ contract PropertyRegistry {
     
     modifier validTransfer(uint256 _transferId) {
         require(transferRequests[_transferId].status != TransferStatus.Completed && 
-                transferRequests[_transferId].status != TransferStatus.Cancelled, 
+                transferRequests[_transferId].status != TransferStatus.Cancelled &&
+                transferRequests[_transferId].status != TransferStatus.Rejected, 
                 "Transfer already completed or cancelled");
         _;
     }
@@ -213,6 +218,8 @@ contract PropertyRegistry {
             registrarVerified: false,
             municipalApproved: false,
             buyerAccepted: false,
+            rejectionReason: "",
+            rejectedBy: address(0),
             createdAt: block.timestamp,
             completedAt: 0
         });
@@ -267,16 +274,19 @@ contract PropertyRegistry {
     
     /**
      * @dev Buyer accepts the transfer and uploads acceptance documents
+     * @notice Buyer must send ETH equal to the transfer price
      */
-    function buyerAccept(uint256 _transferId, string memory _buyerDocumentsHash) external validTransfer(_transferId) {
-        require(msg.sender == transferRequests[_transferId].buyer, "Only buyer can accept");
-        require(transferRequests[_transferId].status == TransferStatus.MunicipalApproved, 
+    function buyerAccept(uint256 _transferId, string memory _buyerDocumentsHash) external payable validTransfer(_transferId) {
+        TransferRequest storage transfer = transferRequests[_transferId];
+        require(msg.sender == transfer.buyer, "Only buyer can accept");
+        require(transfer.status == TransferStatus.MunicipalApproved, 
                 "Municipal approval required first");
         require(bytes(_buyerDocumentsHash).length > 0, "Buyer documents hash required");
+        require(msg.value == transfer.price, "ETH amount must match transfer price");
         
-        transferRequests[_transferId].buyerAccepted = true;
-        transferRequests[_transferId].buyerDocumentsHash = _buyerDocumentsHash;
-        transferRequests[_transferId].status = TransferStatus.BuyerAccepted;
+        transfer.buyerAccepted = true;
+        transfer.buyerDocumentsHash = _buyerDocumentsHash;
+        transfer.status = TransferStatus.BuyerAccepted;
         
         emit BuyerAccepted(_transferId);
         
@@ -286,6 +296,7 @@ contract PropertyRegistry {
     
     /**
      * @dev Complete the transfer (internal function called after buyer acceptance)
+     * @notice Transfers ETH from contract to seller
      */
     function completeTransfer(uint256 _transferId) internal {
         TransferRequest storage transfer = transferRequests[_transferId];
@@ -293,6 +304,14 @@ contract PropertyRegistry {
         
         uint256 propertyId = transfer.propertyId;
         Property storage property = properties[propertyId];
+        
+        // Transfer ETH to seller
+        address seller = transfer.seller;
+        uint256 price = transfer.price;
+        
+        // Send ETH to seller
+        (bool success, ) = payable(seller).call{value: price}("");
+        require(success, "ETH transfer to seller failed");
         
         // Update property ownership
         address oldOwner = property.currentOwner;
@@ -315,6 +334,55 @@ contract PropertyRegistry {
         transfer.completedAt = block.timestamp;
         
         emit TransferCompleted(_transferId, propertyId, transfer.buyer);
+    }
+    
+    /**
+     * @dev Broker rejects the transfer
+     */
+    function brokerReject(uint256 _transferId, string memory _reason) external validTransfer(_transferId) {
+        require(userRoles[msg.sender] == UserRole.Broker, "Only broker can reject");
+        require(transferRequests[_transferId].broker == msg.sender, "Unauthorized broker");
+        require(transferRequests[_transferId].status == TransferStatus.Initiated, 
+                "Transfer not in Initiated status");
+        require(bytes(_reason).length > 0, "Rejection reason required");
+        
+        transferRequests[_transferId].status = TransferStatus.Rejected;
+        transferRequests[_transferId].rejectionReason = _reason;
+        transferRequests[_transferId].rejectedBy = msg.sender;
+        
+        emit TransferRejected(_transferId, msg.sender, _reason);
+    }
+    
+    /**
+     * @dev Registrar rejects the transfer
+     */
+    function registrarReject(uint256 _transferId, string memory _reason) external validTransfer(_transferId) 
+        onlyRole(UserRole.Registrar) {
+        require(transferRequests[_transferId].status == TransferStatus.BrokerVerified, 
+                "Transfer must be broker verified");
+        require(bytes(_reason).length > 0, "Rejection reason required");
+        
+        transferRequests[_transferId].status = TransferStatus.Rejected;
+        transferRequests[_transferId].rejectionReason = _reason;
+        transferRequests[_transferId].rejectedBy = msg.sender;
+        
+        emit TransferRejected(_transferId, msg.sender, _reason);
+    }
+    
+    /**
+     * @dev Municipal rejects the transfer
+     */
+    function municipalReject(uint256 _transferId, string memory _reason) external validTransfer(_transferId) 
+        onlyRole(UserRole.Municipal) {
+        require(transferRequests[_transferId].status == TransferStatus.RegistrarVerified, 
+                "Transfer must be registrar verified");
+        require(bytes(_reason).length > 0, "Rejection reason required");
+        
+        transferRequests[_transferId].status = TransferStatus.Rejected;
+        transferRequests[_transferId].rejectionReason = _reason;
+        transferRequests[_transferId].rejectedBy = msg.sender;
+        
+        emit TransferRejected(_transferId, msg.sender, _reason);
     }
     
     /**
@@ -358,41 +426,8 @@ contract PropertyRegistry {
     /**
      * @dev Get transfer request details
      */
-    function getTransferRequest(uint256 _transferId) external view returns (
-        uint256 transferId,
-        uint256 propertyId,
-        address seller,
-        address buyer,
-        uint256 price,
-        string memory documentsHash,
-        string memory buyerDocumentsHash,
-        TransferStatus status,
-        address broker,
-        bool brokerVerified,
-        bool registrarVerified,
-        bool municipalApproved,
-        bool buyerAccepted,
-        uint256 createdAt,
-        uint256 completedAt
-    ) {
-        TransferRequest memory transfer = transferRequests[_transferId];
-        return (
-            transfer.transferId,
-            transfer.propertyId,
-            transfer.seller,
-            transfer.buyer,
-            transfer.price,
-            transfer.documentsHash,
-            transfer.buyerDocumentsHash,
-            transfer.status,
-            transfer.broker,
-            transfer.brokerVerified,
-            transfer.registrarVerified,
-            transfer.municipalApproved,
-            transfer.buyerAccepted,
-            transfer.createdAt,
-            transfer.completedAt
-        );
+    function getTransferRequest(uint256 _transferId) external view returns (TransferRequest memory) {
+        return transferRequests[_transferId];
     }
     
     /**

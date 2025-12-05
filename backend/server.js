@@ -527,6 +527,87 @@ app.post('/api/transfers/:transferId/municipal-approve', async (req, res) => {
 });
 
 /**
+ * Broker reject transfer
+ */
+app.post('/api/transfers/:transferId/broker-reject', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ error: 'Rejection reason is required' });
+    }
+
+    // Use Broker signer
+    const contractInstance = getContractForRole('broker');
+    const tx = await contractInstance.brokerReject(transferId, reason.trim());
+    const receipt = await tx.wait();
+
+    res.json({
+      success: true,
+      transactionHash: receipt.hash
+    });
+  } catch (error) {
+    console.error('Broker reject error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Registrar reject transfer
+ */
+app.post('/api/transfers/:transferId/registrar-reject', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ error: 'Rejection reason is required' });
+    }
+
+    // Use Registrar signer
+    const contractInstance = getContractForRole('registrar');
+    const tx = await contractInstance.registrarReject(transferId, reason.trim());
+    const receipt = await tx.wait();
+
+    res.json({
+      success: true,
+      transactionHash: receipt.hash
+    });
+  } catch (error) {
+    console.error('Registrar reject error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Municipal reject transfer
+ */
+app.post('/api/transfers/:transferId/municipal-reject', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ error: 'Rejection reason is required' });
+    }
+
+    // Use Municipal signer
+    const contractInstance = getContractForRole('municipal');
+    const tx = await contractInstance.municipalReject(transferId, reason.trim());
+    const receipt = await tx.wait();
+
+    res.json({
+      success: true,
+      transactionHash: receipt.hash
+    });
+  } catch (error) {
+    console.error('Municipal reject error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Buyer accept transfer
  */
 app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async (req, res) => {
@@ -591,10 +672,22 @@ app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async
       });
     }
 
+    // Get transfer details to get the price
+    const transfer = await contract.getTransferRequest(transferId);
+    const price = transfer.price; // Price in wei
+    
     // Use Buyer signer
     const contractInstance = getContractForRole('buyer');
-    const tx = await contractInstance.buyerAccept(transferId, buyerDocumentsHash);
+    
+    // Call buyerAccept with ETH value (price)
+    const tx = await contractInstance.buyerAccept(transferId, buyerDocumentsHash, {
+      value: price // Send ETH equal to transfer price
+    });
     const receipt = await tx.wait();
+    
+    console.log(`✅ ETH Transfer: ${ethers.formatEther(price)} ETH sent from buyer to seller`);
+    console.log(`   Buyer: ${await getSignerAddressForRole('buyer')}`);
+    console.log(`   Seller: ${transfer.seller}`);
 
     res.json({
       success: true,
@@ -695,7 +788,8 @@ app.get('/api/transfers/:transferId', async (req, res) => {
       3: 'MunicipalApproved',
       4: 'BuyerAccepted',
       5: 'Completed',
-      6: 'Cancelled'
+      6: 'Cancelled',
+      7: 'Rejected'
     };
 
     res.json({
@@ -712,6 +806,8 @@ app.get('/api/transfers/:transferId', async (req, res) => {
       registrarVerified: transfer.registrarVerified,
       municipalApproved: transfer.municipalApproved,
       buyerAccepted: transfer.buyerAccepted,
+      rejectionReason: transfer.rejectionReason || '',
+      rejectedBy: transfer.rejectedBy || null,
       createdAt: transfer.createdAt.toString(),
       completedAt: transfer.completedAt.toString()
     });
@@ -737,6 +833,36 @@ app.get('/api/properties/:propertyId/history', async (req, res) => {
     });
   } catch (error) {
     console.error('Get history error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get pending transfers for a broker
+ */
+app.get('/api/brokers/:brokerAddress/pending-transfers', async (req, res) => {
+  try {
+    const { brokerAddress } = req.params;
+    
+    // Normalize address
+    let normalizedAddress;
+    try {
+      normalizedAddress = ethers.getAddress(brokerAddress);
+    } catch (error) {
+      return res.status(400).json({ error: 'Invalid broker address format' });
+    }
+    
+    // Get all transfers (we'll need to iterate through transfer IDs)
+    // For now, we'll return a message indicating this needs manual lookup
+    // In production, you'd maintain a list of transfer IDs or use events
+    
+    // This is a simplified version - in production, you'd query events or maintain an index
+    res.json({
+      pendingTransfers: [],
+      message: 'Please use the transfer lookup feature to find transfers assigned to you.'
+    });
+  } catch (error) {
+    console.error('Get pending transfers error:', error);
     res.status(500).json({ error: error.message });
   }
 });

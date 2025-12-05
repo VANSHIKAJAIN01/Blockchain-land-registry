@@ -15,7 +15,8 @@ import {
   FiSearch,
   FiX,
   FiCopy,
-  FiCheck
+  FiCheck,
+  FiBell
 } from 'react-icons/fi';
 import './App.css';
 
@@ -99,6 +100,27 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showRoleInfo, setShowRoleInfo] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [balance, setBalance] = useState('0.0');
+
+  // Load wallet balance
+  const loadBalance = async (address, providerInstance) => {
+    try {
+      if (providerInstance && address) {
+        console.log('Loading balance for:', address);
+        const balance = await providerInstance.getBalance(address);
+        const formattedBalance = ethers.formatEther(balance);
+        console.log('Balance loaded:', formattedBalance, 'ETH');
+        setBalance(formattedBalance);
+      } else {
+        console.warn('Cannot load balance: provider or address missing', { providerInstance: !!providerInstance, address });
+        setBalance('0.0');
+      }
+    } catch (error) {
+      console.error('Error loading balance:', error);
+      setBalance('0.0');
+    }
+  };
 
   // Connect wallet
   const connectWallet = async () => {
@@ -108,10 +130,36 @@ function App() {
           method: 'eth_requestAccounts'
         });
         setAccount(accounts[0]);
-        const provider = new ethers.BrowserProvider(window.ethereum);
-        setProvider(provider);
+        const providerInstance = new ethers.BrowserProvider(window.ethereum);
+        setProvider(providerInstance);
+        await loadBalance(accounts[0], providerInstance);
         await loadUserRole(accounts[0]);
         await loadUserProperties(accounts[0]);
+        
+        // Check for pending actions for all roles
+        await checkRolePendingActions(accounts[0]);
+        
+        // Listen for account changes
+        window.ethereum.on('accountsChanged', async (newAccounts) => {
+          if (newAccounts.length > 0) {
+            setAccount(newAccounts[0]);
+            await loadBalance(newAccounts[0], providerInstance);
+            await loadUserRole(newAccounts[0]);
+            await loadUserProperties(newAccounts[0]);
+            await checkRolePendingActions(newAccounts[0]);
+          } else {
+            // User disconnected
+            setAccount('');
+            setUserRole('');
+            setProperties([]);
+            setBalance('0.0');
+          }
+        });
+
+        // Listen for balance changes (when transactions occur)
+        window.ethereum.on('chainChanged', () => {
+          window.location.reload();
+        });
       } catch (error) {
         console.error('Error connecting wallet:', error);
         alert('Error connecting wallet: ' + error.message);
@@ -135,6 +183,41 @@ function App() {
       // Set empty role if API fails
       setUserRole('');
       alert('Warning: Could not load user role. Make sure backend is running on port 3001.');
+    }
+  };
+
+  // Check for pending actions for all roles
+  const checkRolePendingActions = async (address) => {
+    try {
+      const roleResponse = await fetch(`${API_URL}/users/${address}/role`);
+      if (roleResponse.ok) {
+        const roleData = await roleResponse.json();
+        const role = roleData.role;
+        
+        // Show role-specific notifications
+        switch (role) {
+          case 'Broker':
+            addNotification('🔔 As a Broker, you can verify transfers assigned to you. Use the "View Transfer" feature to find transfers that need your verification.', 'info');
+            break;
+          case 'Registrar':
+            addNotification('🔔 As a Registrar, you can verify transfers after broker verification. Use the "View Transfer" feature to find transfers that need your verification.', 'info');
+            break;
+          case 'Municipal':
+            addNotification('🔔 As Municipal, you can approve transfers after registrar verification. Use the "View Transfer" feature to find transfers that need your approval.', 'info');
+            break;
+          case 'Buyer':
+            addNotification('🔔 As a Buyer, you can accept transfers after municipal approval. Use the "View Transfer" feature to find transfers assigned to you.', 'info');
+            break;
+          case 'Seller':
+            addNotification('🔔 As a Seller, you can initiate transfers and register properties. Use the "Transfers" tab to start a transfer or "Register Property" to add properties.', 'info');
+            break;
+          default:
+            break;
+        }
+      }
+    } catch (error) {
+      // Silently fail - not critical
+      console.log('Could not check role status:', error);
     }
   };
 
@@ -202,8 +285,47 @@ function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Notification system
+  const addNotification = (message, type = 'info') => {
+    const id = Date.now();
+    const notification = { id, message, type };
+    setNotifications(prev => [...prev, notification]);
+    
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+    
+    return id;
+  };
+
+  const removeNotification = (id) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
   return (
     <div className="App">
+      {/* Notification Container */}
+      <div className="notifications-container">
+        {notifications.map(notification => (
+          <div key={notification.id} className={`notification notification-${notification.type}`}>
+            <div className="notification-content">
+              {notification.type === 'success' && <FiCheckCircle className="notification-icon" />}
+              {notification.type === 'error' && <FiXCircle className="notification-icon" />}
+              {notification.type === 'info' && <FiInfo className="notification-icon" />}
+              {notification.type === 'warning' && <FiBell className="notification-icon" />}
+              <span>{notification.message}</span>
+            </div>
+            <button 
+              className="notification-close" 
+              onClick={() => removeNotification(notification.id)}
+            >
+              <FiX />
+            </button>
+          </div>
+        ))}
+      </div>
+
       <header className="App-header">
         <div className="header-left">
           <div className="logo-container">
@@ -226,6 +348,22 @@ function App() {
                     <span className="address-value">{account.substring(0, 6)}...{account.substring(38)}</span>
                     <button onClick={copyAddress} className="copy-btn" title="Copy address">
                       {copied ? <FiCheck className="copy-icon" /> : <FiCopy className="copy-icon" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="wallet-balance-section" style={{ background: 'rgba(255, 255, 255, 0.15)', padding: '0.75rem 1rem', borderRadius: '8px', backdropFilter: 'blur(10px)' }}>
+                <div className="balance-info">
+                  <span className="balance-label">Balance</span>
+                  <div className="balance-value-container">
+                    <span className="balance-value">{parseFloat(balance).toFixed(4)} ETH</span>
+                    <button 
+                      onClick={() => loadBalance(account, provider)} 
+                      className="refresh-balance-btn" 
+                      title="Refresh balance"
+                      style={{ background: 'rgba(255, 255, 255, 0.2)', border: 'none', color: 'white', padding: '0.25rem 0.5rem', borderRadius: '4px', cursor: 'pointer', marginLeft: '0.5rem' }}
+                    >
+                      <FiRefreshCw style={{ fontSize: '0.9rem' }} />
                     </button>
                   </div>
                 </div>
@@ -299,6 +437,8 @@ function App() {
                 account={account}
                 userRole={userRole}
                 properties={properties}
+                balance={balance}
+                onTabChange={setActiveTab}
               />
             )}
             {activeTab === 'properties' && (
@@ -315,10 +455,16 @@ function App() {
                 uploadFile={uploadFile}
                 provider={provider}
                 onPropertiesUpdate={() => loadUserProperties(account)}
+                addNotification={addNotification}
               />
             )}
             {activeTab === 'register' && (userRole === 'Registrar' || userRole === 'Seller') && (
-              <RegisterProperty uploadFile={uploadFile} account={account} userRole={userRole} />
+              <RegisterProperty 
+                uploadFile={uploadFile} 
+                account={account} 
+                userRole={userRole}
+                onPropertyRegistered={() => loadUserProperties(account)}
+              />
             )}
           </main>
         </div>
@@ -440,7 +586,7 @@ function RoleInfoPanel({ userRole, onClose }) {
 }
 
 // Dashboard Component
-function Dashboard({ account, userRole, properties }) {
+function Dashboard({ account, userRole, properties, balance, onTabChange }) {
   const roleInfo = ROLE_INFO[userRole] || { 
     icon: '👤', 
     color: '#999', 
@@ -472,9 +618,9 @@ function Dashboard({ account, userRole, properties }) {
         </div>
         <div className="stat-card" style={{ background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' }}>
           <FiShield className="stat-icon" />
-          <h3>Wallet Address</h3>
-          <p className="stat-value-small">{account.substring(0, 6)}...{account.substring(38)}</p>
-          <p className="stat-label">Connected</p>
+          <h3>Wallet Balance</h3>
+          <p className="stat-value">{parseFloat(balance || '0').toFixed(4)} ETH</p>
+          <p className="stat-label">{account.substring(0, 6)}...{account.substring(38)}</p>
         </div>
       </div>
 
@@ -482,25 +628,25 @@ function Dashboard({ account, userRole, properties }) {
         <h3>Quick Actions</h3>
         <div className="quick-actions-grid">
           {(userRole === 'Registrar' || userRole === 'Seller') && (
-            <div className="quick-action-card">
+            <div className="quick-action-card" onClick={() => onTabChange('register')}>
               <FiPlus className="action-icon" />
               <h4>Register Property</h4>
               <p>Add a new property to the registry</p>
             </div>
           )}
           {userRole === 'Seller' && (
-            <div className="quick-action-card">
+            <div className="quick-action-card" onClick={() => onTabChange('transfers')}>
               <FiRefreshCw className="action-icon" />
               <h4>Initiate Transfer</h4>
               <p>Start a property transfer process</p>
             </div>
           )}
-          <div className="quick-action-card">
+          <div className="quick-action-card" onClick={() => onTabChange('properties')}>
             <FiSearch className="action-icon" />
             <h4>Search Properties</h4>
             <p>Find properties by ID</p>
           </div>
-          <div className="quick-action-card">
+          <div className="quick-action-card" onClick={() => onTabChange('transfers')}>
             <FiFileText className="action-icon" />
             <h4>View Transfers</h4>
             <p>Check transfer status</p>
@@ -596,11 +742,6 @@ function Properties({ properties, account, userRole }) {
                 className="document-link"
               >
                 <FiFileText className="btn-icon" /> View Documents
-                {searchedProperty.ipfsHash.startsWith('QmMock') && (
-                  <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
-                    (Stored locally - IPFS not configured)
-                  </small>
-                )}
               </a>
             )}
           </div>
@@ -648,11 +789,6 @@ function Properties({ properties, account, userRole }) {
                     className="document-link"
                   >
                     <FiFileText className="btn-icon" /> View Documents
-                    {property.ipfsHash.startsWith('QmMock') && (
-                      <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
-                        (Stored locally - IPFS not configured)
-                      </small>
-                    )}
                   </a>
                 )}
               </div>
@@ -665,7 +801,10 @@ function Properties({ properties, account, userRole }) {
 }
 
 // Transfers Component
-function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate }) {
+function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate, addNotification }) {
+  const [transactionHash, setTransactionHash] = useState(null);
+  const [transactionDetails, setTransactionDetails] = useState(null);
+  const [loadingTx, setLoadingTx] = useState(false);
   const [transferForm, setTransferForm] = useState({
     propertyId: '',
     buyer: '',
@@ -678,7 +817,8 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
   const [transferDetails, setTransferDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [viewingTransfer, setViewingTransfer] = useState(false);
-  const [useBackendAPI, setUseBackendAPI] = useState(true); // Default to backend API to avoid MetaMask issues
+  // Always use Backend API (no checkbox needed)
+  const useBackendAPI = true;
   
   // Contract address (from deployment.json)
   const CONTRACT_ADDRESS = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
@@ -715,14 +855,22 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
           propertyId: transferForm.propertyId,
           buyer: transferForm.buyer,
           price: transferForm.price,
-          broker: transferForm.broker || null,
+          broker: transferForm.broker,
           documentsHash: ipfsHash
         })
       });
 
       const data = await response.json();
       if (data.success) {
-        alert('Transfer initiated successfully! Transfer ID: ' + data.transferId);
+        const message = `Transfer initiated successfully! Transfer ID: ${data.transferId}`;
+        alert(message);
+        addNotification(message, 'success');
+        
+        // Notify broker if broker address is provided
+        if (transferForm.broker) {
+          addNotification(`Broker ${transferForm.broker.substring(0, 10)}... has been notified to verify this transfer.`, 'info');
+        }
+        
         setTransferForm({ propertyId: '', buyer: '', price: '', broker: '', file: null });
       }
     } catch (error) {
@@ -745,144 +893,46 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
     }
   };
 
-  const handleAction = async (action, transferId, file = null) => {
-    // Use backend API by default (avoids MetaMask popup issues)
-    if (useBackendAPI) {
-      return handleActionViaBackend(action, transferId, file);
-    }
-    
-    // Use MetaMask (direct contract call)
-    if (!provider || !account) {
-      alert('Please connect your wallet first');
-      return;
-    }
-
-    const actionNames = {
-      'brokerVerify': 'Broker Verification',
-      'registrarVerify': 'Registrar Verification',
-      'municipalApprove': 'Municipal Approval',
-      'buyerAccept': 'Buyer Acceptance',
-      'cancel': 'Cancel Transfer'
-    };
-
-    const actionName = actionNames[action] || action;
-    
-    const confirmMessage = `You are about to ${actionName.toLowerCase()} for Transfer #${transferId}.\n\n` +
-      `This will open MetaMask for you to review and confirm the transaction.\n\n` +
-      `Contract: ${CONTRACT_ADDRESS}\n` +
-      `Your Account: ${account}\n\n` +
-      `Click OK to proceed to MetaMask.`;
-    
-    if (!window.confirm(confirmMessage)) {
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const signer = await provider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
-
-      let tx;
-      let txHash;
-      
-      switch (action) {
-        case 'brokerVerify':
-          tx = await contract.brokerVerify(transferId);
-          txHash = tx.hash;
-          alert(`Transaction submitted!\n\nHash: ${txHash}\n\nWaiting for confirmation...`);
-          await tx.wait();
-          alert('✅ Broker verification completed successfully!');
-          break;
-          
-        case 'registrarVerify':
-          tx = await contract.registrarVerify(transferId);
-          txHash = tx.hash;
-          alert(`Transaction submitted!\n\nHash: ${txHash}\n\nWaiting for confirmation...`);
-          await tx.wait();
-          alert('✅ Registrar verification completed successfully!');
-          break;
-          
-        case 'municipalApprove':
-          tx = await contract.municipalApprove(transferId);
-          txHash = tx.hash;
-          alert(`Transaction submitted!\n\nHash: ${txHash}\n\nWaiting for confirmation...`);
-          await tx.wait();
-          alert('✅ Municipal approval completed successfully!');
-          break;
-          
-        case 'buyerAccept':
-          if (!file) {
-            alert('Please select a file to upload');
-            setLoading(false);
-            return;
-          }
-          
-          const ipfsHash = await uploadFile(file);
-          tx = await contract.buyerAccept(transferId, ipfsHash);
-          txHash = tx.hash;
-          alert(`Transaction submitted!\n\nHash: ${txHash}\n\nWaiting for confirmation...`);
-          await tx.wait();
-          alert('✅ Transfer accepted successfully!');
-          break;
-          
-        case 'cancel':
-          tx = await contract.cancelTransfer(transferId);
-          txHash = tx.hash;
-          alert(`Transaction submitted!\n\nHash: ${txHash}\n\nWaiting for confirmation...`);
-          await tx.wait();
-          alert('✅ Transfer cancelled successfully!');
-          break;
-          
-        default:
-          setLoading(false);
-          return;
-      }
-
-      if (transferDetails) {
-        await loadTransferDetails(transferId);
-      }
-      // Reload properties if transfer was completed (ownership changed)
-      if (action === 'buyerAccept' && onPropertiesUpdate) {
-        await onPropertiesUpdate();
-      }
-    } catch (error) {
-      console.error('Error:', error);
-      let errorMessage = error.message || 'Unknown error';
-      
-      if (error.code === 4001 || error.message.includes('user rejected') || error.message.includes('User denied')) {
-        alert('❌ Transaction cancelled by user');
-        setLoading(false);
-        return;
-      }
-      
-      if (error.reason) {
-        errorMessage = error.reason;
-      } else if (error.data?.message) {
-        errorMessage = error.data.message;
-      }
-      
-      alert('❌ Error performing action: ' + errorMessage);
-    } finally {
-      setLoading(false);
-    }
+  const handleAction = async (action, transferId, file = null, reason = null) => {
+    // Always use backend API
+    return handleActionViaBackend(action, transferId, file, reason);
   };
 
   // Handle actions via backend API (no MetaMask popup)
-  const handleActionViaBackend = async (action, transferId, file = null) => {
+  const handleActionViaBackend = async (action, transferId, file = null, reason = null) => {
     setLoading(true);
     try {
       let endpoint = '';
       let formData = null;
+      let body = null;
       
       switch (action) {
         case 'brokerVerify':
           endpoint = `${API_URL}/transfers/${transferId}/broker-verify`;
           break;
+        case 'brokerReject':
+          endpoint = `${API_URL}/transfers/${transferId}/broker-reject`;
+          if (reason) {
+            body = JSON.stringify({ reason: reason });
+          }
+          break;
         case 'registrarVerify':
           endpoint = `${API_URL}/transfers/${transferId}/registrar-verify`;
           break;
+        case 'registrarReject':
+          endpoint = `${API_URL}/transfers/${transferId}/registrar-reject`;
+          if (reason) {
+            body = JSON.stringify({ reason: reason });
+          }
+          break;
         case 'municipalApprove':
           endpoint = `${API_URL}/transfers/${transferId}/municipal-approve`;
+          break;
+        case 'municipalReject':
+          endpoint = `${API_URL}/transfers/${transferId}/municipal-reject`;
+          if (reason) {
+            body = JSON.stringify({ reason: reason });
+          }
           break;
         case 'buyerAccept':
           endpoint = `${API_URL}/transfers/${transferId}/buyer-accept`;
@@ -901,17 +951,49 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
 
       const options = {
         method: 'POST',
+        headers: {}
       };
       
       if (formData) {
+        // FormData - don't set Content-Type, browser will set it with boundary
         options.body = formData;
+      } else if (body) {
+        // JSON body for rejections
+        options.headers['Content-Type'] = 'application/json';
+        options.body = body;
       }
 
       const response = await fetch(endpoint, options);
       const data = await response.json();
       
       if (data.success) {
-        alert(`✅ Action completed successfully!\n\nTransaction Hash: ${data.transactionHash || 'N/A'}`);
+        const txHash = data.transactionHash;
+        const successMsg = `✅ Action completed successfully! Transaction Hash: ${txHash || 'N/A'}`;
+        alert(successMsg);
+        addNotification(successMsg, 'success');
+        
+        // Store transaction hash and fetch details
+        if (txHash && provider) {
+          setTransactionHash(txHash);
+          await fetchTransactionDetails(txHash, provider);
+        }
+        
+        // Show ETH transfer notification when buyer accepts
+        if (action === 'buyerAccept' && transferDetails && transferDetails.seller) {
+          const ethAmount = transferDetails.price || '0';
+          addNotification(`💰 ETH Transfer: ${ethAmount} ETH sent from buyer to seller`, 'success');
+          addNotification(`Seller ${transferDetails.seller.substring(0, 10)}... has been notified that the transfer has been completed.`, 'info');
+        }
+        
+        // Notify next role in workflow
+        if (action === 'brokerVerify' && transferDetails) {
+          addNotification('Registrar has been notified to verify this transfer.', 'info');
+        } else if (action === 'registrarVerify' && transferDetails) {
+          addNotification('Municipal office has been notified to approve this transfer.', 'info');
+        } else if (action === 'municipalApprove' && transferDetails) {
+          addNotification(`Buyer ${transferDetails.buyer.substring(0, 10)}... has been notified to accept this transfer.`, 'info');
+        }
+        
         if (transferDetails) {
           await loadTransferDetails(transferId);
         }
@@ -930,6 +1012,38 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
     }
   };
 
+  // Fetch transaction details from blockchain
+  const fetchTransactionDetails = async (txHash, providerInstance) => {
+    if (!txHash || !providerInstance) return;
+    
+    setLoadingTx(true);
+    try {
+      const tx = await providerInstance.getTransaction(txHash);
+      const receipt = await providerInstance.getTransactionReceipt(txHash);
+      const block = await providerInstance.getBlock(receipt.blockNumber);
+      
+      setTransactionDetails({
+        hash: txHash,
+        from: tx.from,
+        to: tx.to,
+        value: ethers.formatEther(tx.value || 0),
+        gasPrice: ethers.formatUnits(tx.gasPrice || 0, 'gwei'),
+        gasLimit: tx.gasLimit.toString(),
+        gasUsed: receipt.gasUsed.toString(),
+        blockNumber: receipt.blockNumber.toString(),
+        confirmations: receipt.confirmations,
+        status: receipt.status === 1 ? 'Success' : 'Failed',
+        timestamp: new Date(block.timestamp * 1000).toLocaleString(),
+        network: (await providerInstance.getNetwork()).name
+      });
+    } catch (error) {
+      console.error('Error fetching transaction details:', error);
+      setTransactionDetails(null);
+    } finally {
+      setLoadingTx(false);
+    }
+  };
+
   const getStatusColor = (status) => {
     const colors = {
       'Initiated': '#ff9800',
@@ -938,7 +1052,8 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
       'MunicipalApproved': '#4caf50',
       'BuyerAccepted': '#00bcd4',
       'Completed': '#009688',
-      'Cancelled': '#f44336'
+      'Cancelled': '#f44336',
+      'Rejected': '#d32f2f'
     };
     return colors[status] || '#666';
   };
@@ -949,26 +1064,87 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
       
       {!viewingTransfer ? (
         <>
-          {/* Transaction Method Toggle */}
-          <div className="transfer-section" style={{ marginBottom: '1rem', padding: '1rem', background: '#e3f2fd', borderRadius: '8px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={useBackendAPI}
-                onChange={(e) => setUseBackendAPI(e.target.checked)}
-                style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-              />
-              <span>
-                <strong>Use Backend API</strong> (No MetaMask popup required)
-                <br />
-                <small style={{ color: '#666' }}>
-                  {useBackendAPI 
-                    ? 'Transactions will be signed by backend. Update backend .env with correct private key for your role.'
-                    : 'Transactions will require MetaMask approval.'}
-                </small>
-              </span>
-            </label>
-          </div>
+          {/* Role Notification Banners */}
+          {userRole === 'Broker' && (
+            <div className="transfer-section" style={{ marginBottom: '1rem', padding: '1rem', background: '#fff8f0', border: '2px solid #ff9800', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <FiBell style={{ fontSize: '1.5rem', color: '#ff9800' }} />
+                <div>
+                  <strong style={{ color: '#333', display: 'block', marginBottom: '0.25rem' }}>
+                    🔔 Broker Notification
+                  </strong>
+                  <p style={{ margin: 0, color: '#666', fontSize: '0.95rem' }}>
+                    You have transfers assigned to you that need verification. Use the "View Transfer" section below to enter a Transfer ID and verify transfers where you are the assigned broker.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {userRole === 'Registrar' && (
+            <div className="transfer-section" style={{ marginBottom: '1rem', padding: '1rem', background: '#f3e5f5', border: '2px solid #9c27b0', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <FiBell style={{ fontSize: '1.5rem', color: '#9c27b0' }} />
+                <div>
+                  <strong style={{ color: '#333', display: 'block', marginBottom: '0.25rem' }}>
+                    🔔 Registrar Notification
+                  </strong>
+                  <p style={{ margin: 0, color: '#666', fontSize: '0.95rem' }}>
+                    You can verify transfers after broker verification. Use the "View Transfer" section below to enter a Transfer ID and verify transfers that have been broker-verified.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {userRole === 'Municipal' && (
+            <div className="transfer-section" style={{ marginBottom: '1rem', padding: '1rem', background: '#fff8f0', border: '2px solid #ff9800', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <FiBell style={{ fontSize: '1.5rem', color: '#ff9800' }} />
+                <div>
+                  <strong style={{ color: '#333', display: 'block', marginBottom: '0.25rem' }}>
+                    🔔 Municipal Notification
+                  </strong>
+                  <p style={{ margin: 0, color: '#666', fontSize: '0.95rem' }}>
+                    You can approve transfers after registrar verification. Use the "View Transfer" section below to enter a Transfer ID and approve transfers that have been registrar-verified.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {userRole === 'Buyer' && (
+            <div className="transfer-section" style={{ marginBottom: '1rem', padding: '1rem', background: '#e3f2fd', border: '2px solid #2196f3', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <FiBell style={{ fontSize: '1.5rem', color: '#2196f3' }} />
+                <div>
+                  <strong style={{ color: '#333', display: 'block', marginBottom: '0.25rem' }}>
+                    🔔 Buyer Notification
+                  </strong>
+                  <p style={{ margin: 0, color: '#666', fontSize: '0.95rem' }}>
+                    You can accept transfers after municipal approval. Use the "View Transfer" section below to enter a Transfer ID and accept transfers assigned to you that have been approved by municipal.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {userRole === 'Seller' && (
+            <div className="transfer-section" style={{ marginBottom: '1rem', padding: '1rem', background: '#e8f5e9', border: '2px solid #4caf50', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <FiBell style={{ fontSize: '1.5rem', color: '#4caf50' }} />
+                <div>
+                  <strong style={{ color: '#333', display: 'block', marginBottom: '0.25rem' }}>
+                    🔔 Seller Notification
+                  </strong>
+                  <p style={{ margin: 0, color: '#666', fontSize: '0.95rem' }}>
+                    You can initiate transfers and register properties. Use the form below to initiate a new transfer or go to "Register Property" tab to add new properties.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
 
           {/* Initiate Transfer Form */}
           {userRole === 'Seller' && (
@@ -1009,14 +1185,15 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                   />
                 </div>
                 <div className="form-group">
-                  <label>Broker Address (Optional)</label>
+                  <label>Broker Address *</label>
                   <input
                     type="text"
-                    placeholder="0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65 (leave empty if no broker)"
+                    placeholder="0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
                     value={transferForm.broker}
                     onChange={(e) => setTransferForm({ ...transferForm, broker: e.target.value })}
+                    required
                   />
-                  <small>If a broker is involved, enter their Ethereum address (42 characters). Example: 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65. Leave empty to skip broker verification.</small>
+                  <small>Enter the Ethereum address of the broker (42 characters). Example: 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65. Broker verification is required for all transfers.</small>
                 </div>
                 <div className="form-group">
                   <label>Property Documents (Deed/Title) *</label>
@@ -1107,28 +1284,16 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                     {transferDetails.documentsHash && (
                       <div className="document-item">
                         <p><strong><FiFileText className="inline-icon" /> Seller Documents:</strong></p>
-                        {transferDetails.documentsHash.startsWith('QmMock') ? (
-                          <a
-                            href={`${API_URL}/documents/${transferDetails.documentsHash}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="document-link"
-                          >
-                            <FiFileText className="btn-icon" /> View Seller Documents
-                            <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
-                              (Stored locally - IPFS not configured)
-                            </small>
-                          </a>
-                        ) : (
-                          <a
-                            href={`https://ipfs.io/ipfs/${transferDetails.documentsHash}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="document-link"
-                          >
-                            <FiFileText className="btn-icon" /> View Seller Documents on IPFS
-                          </a>
-                        )}
+                        <a
+                          href={transferDetails.documentsHash.startsWith('QmMock') 
+                            ? `${API_URL}/documents/${transferDetails.documentsHash}`
+                            : `https://ipfs.io/ipfs/${transferDetails.documentsHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="document-link"
+                        >
+                          <FiFileText className="btn-icon" /> View Documents
+                        </a>
                       </div>
                     )}
                     {transferDetails.buyerDocumentsHash && (
@@ -1142,12 +1307,7 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                           rel="noopener noreferrer"
                           className="document-link"
                         >
-                          <FiFileText className="btn-icon" /> View Buyer Documents
-                          {transferDetails.buyerDocumentsHash.startsWith('QmMock') && (
-                            <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
-                              (Stored locally - IPFS not configured)
-                            </small>
-                          )}
+                          <FiFileText className="btn-icon" /> View Documents
                         </a>
                       </div>
                     )}
@@ -1156,33 +1316,152 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
 
                 <div className="verification-status">
                   <h4><FiCheckCircle className="section-icon" /> Verification Status</h4>
+                  {transferDetails.status === 'Rejected' ? (
+                    <div style={{ 
+                      padding: '1rem', 
+                      background: '#ffebee', 
+                      border: '2px solid #f44336', 
+                      borderRadius: '8px',
+                      marginBottom: '1rem'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                        <FiXCircle style={{ color: '#f44336', fontSize: '1.5rem' }} />
+                        <strong style={{ color: '#c62828', fontSize: '1.1rem' }}>Workflow Stopped - Transfer Rejected</strong>
+                      </div>
+                      {transferDetails.rejectedBy && (
+                        <p style={{ margin: '0.5rem 0', color: '#666' }}>
+                          Rejected by: <strong>{transferDetails.rejectedBy.substring(0, 10)}...{transferDetails.rejectedBy.substring(38)}</strong>
+                        </p>
+                      )}
+                      {transferDetails.rejectionReason && (
+                        <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#fff', borderRadius: '4px', border: '1px solid #ffcdd2' }}>
+                          <strong style={{ color: '#c62828', display: 'block', marginBottom: '0.25rem' }}>Reason:</strong>
+                          <p style={{ margin: 0, color: '#333' }}>{transferDetails.rejectionReason}</p>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                   <div className="verification-grid">
-                    <div className={`verification-item ${transferDetails.brokerVerified ? 'verified' : 'pending'}`}>
-                      {transferDetails.brokerVerified ? <FiCheckCircle className="verification-icon verified-icon" /> : <FiClock className="verification-icon pending-icon" />}
+                    {/* Broker Verification */}
+                    <div className={`verification-item ${
+                      transferDetails.status === 'Rejected' && !transferDetails.brokerVerified
+                        ? 'rejected' 
+                        : transferDetails.brokerVerified 
+                          ? 'verified' 
+                          : transferDetails.status === 'Rejected'
+                            ? 'blocked' 
+                            : 'pending'
+                    }`}>
+                      {transferDetails.status === 'Rejected' && !transferDetails.brokerVerified ? (
+                        <FiXCircle className="verification-icon rejected-icon" />
+                      ) : transferDetails.brokerVerified ? (
+                        <FiCheckCircle className="verification-icon verified-icon" />
+                      ) : transferDetails.status === 'Rejected' ? (
+                        <FiX className="verification-icon blocked-icon" />
+                      ) : (
+                        <FiClock className="verification-icon pending-icon" />
+                      )}
                       <div>
                         <strong>Broker</strong>
-                        <p>{transferDetails.brokerVerified ? 'Verified' : 'Pending'}</p>
+                        <p>
+                          {transferDetails.status === 'Rejected' && !transferDetails.brokerVerified
+                            ? 'Rejected' 
+                            : transferDetails.brokerVerified 
+                              ? 'Verified' 
+                              : transferDetails.status === 'Rejected' 
+                                ? 'Blocked' 
+                                : 'Pending'}
+                        </p>
                       </div>
                     </div>
-                    <div className={`verification-item ${transferDetails.registrarVerified ? 'verified' : 'pending'}`}>
-                      {transferDetails.registrarVerified ? <FiCheckCircle className="verification-icon verified-icon" /> : <FiClock className="verification-icon pending-icon" />}
+                    {/* Registrar Verification */}
+                    <div className={`verification-item ${
+                      transferDetails.status === 'Rejected' && transferDetails.brokerVerified && !transferDetails.registrarVerified
+                        ? 'rejected'
+                        : transferDetails.registrarVerified 
+                          ? 'verified' 
+                          : transferDetails.status === 'Rejected' || !transferDetails.brokerVerified
+                            ? 'blocked' 
+                            : 'pending'
+                    }`}>
+                      {transferDetails.status === 'Rejected' && transferDetails.brokerVerified && !transferDetails.registrarVerified ? (
+                        <FiXCircle className="verification-icon rejected-icon" />
+                      ) : transferDetails.registrarVerified ? (
+                        <FiCheckCircle className="verification-icon verified-icon" />
+                      ) : transferDetails.status === 'Rejected' || !transferDetails.brokerVerified ? (
+                        <FiX className="verification-icon blocked-icon" />
+                      ) : (
+                        <FiClock className="verification-icon pending-icon" />
+                      )}
                       <div>
                         <strong>Registrar</strong>
-                        <p>{transferDetails.registrarVerified ? 'Verified' : 'Pending'}</p>
+                        <p>
+                          {transferDetails.status === 'Rejected' && transferDetails.brokerVerified && !transferDetails.registrarVerified
+                            ? 'Rejected'
+                            : transferDetails.registrarVerified 
+                              ? 'Verified' 
+                              : transferDetails.status === 'Rejected' || !transferDetails.brokerVerified
+                                ? 'Blocked' 
+                                : 'Pending'}
+                        </p>
                       </div>
                     </div>
-                    <div className={`verification-item ${transferDetails.municipalApproved ? 'verified' : 'pending'}`}>
-                      {transferDetails.municipalApproved ? <FiCheckCircle className="verification-icon verified-icon" /> : <FiClock className="verification-icon pending-icon" />}
+                    {/* Municipal Approval */}
+                    <div className={`verification-item ${
+                      transferDetails.status === 'Rejected' && transferDetails.registrarVerified && !transferDetails.municipalApproved
+                        ? 'rejected'
+                        : transferDetails.municipalApproved 
+                          ? 'verified' 
+                          : transferDetails.status === 'Rejected' || !transferDetails.registrarVerified
+                            ? 'blocked' 
+                            : 'pending'
+                    }`}>
+                      {transferDetails.status === 'Rejected' && transferDetails.registrarVerified && !transferDetails.municipalApproved ? (
+                        <FiXCircle className="verification-icon rejected-icon" />
+                      ) : transferDetails.municipalApproved ? (
+                        <FiCheckCircle className="verification-icon verified-icon" />
+                      ) : transferDetails.status === 'Rejected' || !transferDetails.registrarVerified ? (
+                        <FiX className="verification-icon blocked-icon" />
+                      ) : (
+                        <FiClock className="verification-icon pending-icon" />
+                      )}
                       <div>
                         <strong>Municipal</strong>
-                        <p>{transferDetails.municipalApproved ? 'Approved' : 'Pending'}</p>
+                        <p>
+                          {transferDetails.status === 'Rejected' && transferDetails.registrarVerified && !transferDetails.municipalApproved
+                            ? 'Rejected'
+                            : transferDetails.municipalApproved 
+                              ? 'Approved' 
+                              : transferDetails.status === 'Rejected' || !transferDetails.registrarVerified
+                                ? 'Blocked' 
+                                : 'Pending'}
+                        </p>
                       </div>
                     </div>
-                    <div className={`verification-item ${transferDetails.buyerAccepted ? 'verified' : 'pending'}`}>
-                      {transferDetails.buyerAccepted ? <FiCheckCircle className="verification-icon verified-icon" /> : <FiClock className="verification-icon pending-icon" />}
+                    {/* Buyer Acceptance */}
+                    <div className={`verification-item ${
+                      transferDetails.buyerAccepted 
+                        ? 'verified' 
+                        : transferDetails.status === 'Rejected' || !transferDetails.municipalApproved
+                          ? 'blocked' 
+                          : 'pending'
+                    }`}>
+                      {transferDetails.buyerAccepted ? (
+                        <FiCheckCircle className="verification-icon verified-icon" />
+                      ) : transferDetails.status === 'Rejected' || !transferDetails.municipalApproved ? (
+                        <FiX className="verification-icon blocked-icon" />
+                      ) : (
+                        <FiClock className="verification-icon pending-icon" />
+                      )}
                       <div>
                         <strong>Buyer</strong>
-                        <p>{transferDetails.buyerAccepted ? 'Accepted' : 'Pending'}</p>
+                        <p>
+                          {transferDetails.buyerAccepted 
+                            ? 'Accepted' 
+                            : transferDetails.status === 'Rejected' || !transferDetails.municipalApproved
+                              ? 'Blocked' 
+                              : 'Pending'}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -1195,42 +1474,66 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                      transferDetails.status === 'Initiated' && 
                      transferDetails.broker.toLowerCase() === account.toLowerCase() && (
                       <div className="action-card">
-                        <p className="action-note">🤝 <strong>Your Action Required:</strong> Verify this transaction as the assigned broker.</p>
-                        <button
-                          onClick={() => handleAction('brokerVerify', transferDetails.transferId)}
-                          disabled={loading}
-                          className="action-btn broker-btn"
-                        >
-                          ✓ Verify as Broker
-                        </button>
+                        <p className="action-note">🤝 <strong>Your Action Required:</strong> Verify or reject this transaction as the assigned broker.</p>
+                        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                          <button
+                            onClick={() => handleAction('brokerVerify', transferDetails.transferId)}
+                            disabled={loading}
+                            className="action-btn broker-btn"
+                          >
+                            ✓ Verify as Broker
+                          </button>
+                          <RejectionForm
+                            transferId={transferDetails.transferId}
+                            onReject={(reason) => handleAction('brokerReject', transferDetails.transferId, null, reason)}
+                            loading={loading}
+                            role="Broker"
+                          />
+                        </div>
                       </div>
                     )}
                     
                     {userRole === 'Registrar' && 
                      transferDetails.status === 'BrokerVerified' && (
                       <div className="action-card">
-                        <p className="action-note">📋 <strong>Your Action Required:</strong> Verify documents and ownership as Registrar.</p>
-                        <button
-                          onClick={() => handleAction('registrarVerify', transferDetails.transferId)}
-                          disabled={loading}
-                          className="action-btn registrar-btn"
-                        >
-                          ✓ Verify as Registrar
-                        </button>
+                        <p className="action-note">📋 <strong>Your Action Required:</strong> Verify or reject documents and ownership as Registrar.</p>
+                        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                          <button
+                            onClick={() => handleAction('registrarVerify', transferDetails.transferId)}
+                            disabled={loading}
+                            className="action-btn registrar-btn"
+                          >
+                            ✓ Verify as Registrar
+                          </button>
+                          <RejectionForm
+                            transferId={transferDetails.transferId}
+                            onReject={(reason) => handleAction('registrarReject', transferDetails.transferId, null, reason)}
+                            loading={loading}
+                            role="Registrar"
+                          />
+                        </div>
                       </div>
                     )}
                     
                     {userRole === 'Municipal' && 
                      transferDetails.status === 'RegistrarVerified' && (
                       <div className="action-card">
-                        <p className="action-note">🏛️ <strong>Your Action Required:</strong> Grant final approval as Municipal office.</p>
-                        <button
-                          onClick={() => handleAction('municipalApprove', transferDetails.transferId)}
-                          disabled={loading}
-                          className="action-btn municipal-btn"
-                        >
-                          ✓ Approve as Municipal
-                        </button>
+                        <p className="action-note">🏛️ <strong>Your Action Required:</strong> Approve or reject this transfer as Municipal office.</p>
+                        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                          <button
+                            onClick={() => handleAction('municipalApprove', transferDetails.transferId)}
+                            disabled={loading}
+                            className="action-btn municipal-btn"
+                          >
+                            ✓ Approve as Municipal
+                          </button>
+                          <RejectionForm
+                            transferId={transferDetails.transferId}
+                            onReject={(reason) => handleAction('municipalReject', transferDetails.transferId, null, reason)}
+                            loading={loading}
+                            role="Municipal"
+                          />
+                        </div>
                       </div>
                     )}
                     
@@ -1239,6 +1542,20 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                      transferDetails.buyer.toLowerCase() === account.toLowerCase() && (
                       <div className="action-card">
                         <p className="action-note">👤 <strong>Your Action Required:</strong> Accept the transfer and upload your acceptance documents.</p>
+                        <div className="eth-payment-notice" style={{ marginBottom: '1rem', padding: '1rem', background: 'linear-gradient(135deg, #fff3cd 0%, #ffe082 100%)', borderRadius: '6px', border: '2px solid #ffc107' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
+                            <FiShield style={{ fontSize: '1.5rem', color: '#f57c00' }} />
+                            <strong style={{ color: '#e65100', fontSize: '1.1rem' }}>💰 ETH Payment Required</strong>
+                          </div>
+                          <p style={{ margin: '0.5rem 0', color: '#333' }}>
+                            You will need to send <strong style={{ color: '#e65100', fontSize: '1.1rem' }}>{transferDetails.price} ETH</strong> to complete this transfer.
+                          </p>
+                          <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#fff', borderRadius: '4px', border: '1px solid #ffc107' }}>
+                            <p style={{ margin: 0, fontSize: '0.9rem', color: '#666' }}>
+                              <strong>How it works:</strong> When you accept, {transferDetails.price} ETH will be deducted from your wallet and automatically transferred to the seller ({transferDetails.seller.substring(0, 8)}...{transferDetails.seller.substring(36)}) through the smart contract.
+                            </p>
+                          </div>
+                        </div>
                         <BuyerAcceptForm
                           transferId={transferDetails.transferId}
                           onAccept={handleAction}
@@ -1265,13 +1582,189 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                     )}
 
                     {transferDetails.status === 'Completed' && (
-                      <div className="success-message">
-                        <FiCheckCircle className="success-icon" />
-                        <div>
-                          <strong>Transfer Completed!</strong>
-                          <p>Property ownership has been transferred on the blockchain.</p>
+                      <>
+                        <div className="success-message">
+                          <FiCheckCircle className="success-icon" />
+                          <div>
+                            <strong>Transfer Completed!</strong>
+                            <p>Property ownership has been transferred on the blockchain.</p>
+                          </div>
                         </div>
-                      </div>
+                        
+                        {/* ETH Transfer Visualization */}
+                        <div className="eth-transfer-section" style={{
+                          marginTop: '1.5rem',
+                          padding: '1.5rem',
+                          background: 'linear-gradient(135deg, #e8f5e9 0%, #f1f8f4 100%)',
+                          border: '2px solid #4caf50',
+                          borderRadius: '8px'
+                        }}>
+                          <h4 style={{ marginBottom: '1rem', color: '#2e7d32', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <FiShield style={{ fontSize: '1.25rem' }} />
+                            ETH Transfer Flow
+                          </h4>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
+                            {/* Buyer */}
+                            <div style={{ flex: '1', minWidth: '150px', textAlign: 'center', padding: '1rem', background: '#fff', borderRadius: '6px', border: '2px solid #2196f3' }}>
+                              <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>👤</div>
+                              <strong style={{ display: 'block', marginBottom: '0.25rem', color: '#1976d2' }}>Buyer</strong>
+                              <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0', wordBreak: 'break-all' }}>
+                                {transferDetails.buyer.substring(0, 8)}...{transferDetails.buyer.substring(36)}
+                              </p>
+                              <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: '#ffebee', borderRadius: '4px' }}>
+                                <span style={{ color: '#c62828', fontWeight: 'bold' }}>-{transferDetails.price} ETH</span>
+                              </div>
+                            </div>
+                            
+                            {/* Arrow */}
+                            <div style={{ fontSize: '2rem', color: '#4caf50', fontWeight: 'bold' }}>→</div>
+                            
+                            {/* Contract */}
+                            <div style={{ flex: '1', minWidth: '150px', textAlign: 'center', padding: '1rem', background: '#fff', borderRadius: '6px', border: '2px solid #9c27b0' }}>
+                              <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🔐</div>
+                              <strong style={{ display: 'block', marginBottom: '0.25rem', color: '#7b1fa2' }}>Smart Contract</strong>
+                              <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0' }}>
+                                PropertyRegistry
+                              </p>
+                              <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: '#f3e5f5', borderRadius: '4px' }}>
+                                <span style={{ color: '#7b1fa2', fontWeight: 'bold' }}>Holds {transferDetails.price} ETH</span>
+                              </div>
+                            </div>
+                            
+                            {/* Arrow */}
+                            <div style={{ fontSize: '2rem', color: '#4caf50', fontWeight: 'bold' }}>→</div>
+                            
+                            {/* Seller */}
+                            <div style={{ flex: '1', minWidth: '150px', textAlign: 'center', padding: '1rem', background: '#fff', borderRadius: '6px', border: '2px solid #4caf50' }}>
+                              <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🏠</div>
+                              <strong style={{ display: 'block', marginBottom: '0.25rem', color: '#2e7d32' }}>Seller</strong>
+                              <p style={{ fontSize: '0.85rem', color: '#666', margin: '0.25rem 0', wordBreak: 'break-all' }}>
+                                {transferDetails.seller.substring(0, 8)}...{transferDetails.seller.substring(36)}
+                              </p>
+                              <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: '#e8f5e9', borderRadius: '4px' }}>
+                                <span style={{ color: '#2e7d32', fontWeight: 'bold' }}>+{transferDetails.price} ETH</span>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#fff', borderRadius: '4px', border: '1px solid #c8e6c9' }}>
+                            <p style={{ margin: 0, fontSize: '0.9rem', color: '#333' }}>
+                              <strong>💰 Total Amount Transferred:</strong> <span style={{ color: '#2e7d32', fontWeight: 'bold' }}>{transferDetails.price} ETH</span>
+                            </p>
+                            <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.85rem', color: '#666' }}>
+                              The ETH was automatically transferred from the buyer's wallet to the seller's wallet through the smart contract upon transfer completion.
+                            </p>
+                          </div>
+                        </div>
+                        
+                        {/* Blockchain Transaction Details */}
+                        {transactionHash && (
+                          <div className="transaction-details-section" style={{
+                            marginTop: '1.5rem',
+                            padding: '1.5rem',
+                            background: '#f5f5f5',
+                            border: '2px solid #667eea',
+                            borderRadius: '8px'
+                          }}>
+                            <h4 style={{ marginBottom: '1rem', color: '#667eea', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <FiShield style={{ fontSize: '1.25rem' }} />
+                              Blockchain Transaction Details
+                            </h4>
+                            
+                            {loadingTx ? (
+                              <p style={{ textAlign: 'center', color: '#666' }}>Loading transaction details...</p>
+                            ) : transactionDetails ? (
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1rem' }}>
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Transaction Hash:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all', color: '#333' }}>
+                                    {transactionDetails.hash}
+                                  </p>
+                                  <button
+                                    onClick={() => navigator.clipboard.writeText(transactionDetails.hash)}
+                                    style={{ marginTop: '0.5rem', padding: '0.25rem 0.5rem', background: '#667eea', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}
+                                  >
+                                    <FiCopy style={{ fontSize: '0.75rem', marginRight: '0.25rem' }} /> Copy
+                                  </button>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>From:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all', color: '#333' }}>
+                                    {transactionDetails.from}
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>To (Contract):</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all', color: '#333' }}>
+                                    {transactionDetails.to}
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Value:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '1rem', color: '#2e7d32', fontWeight: 'bold' }}>
+                                    {transactionDetails.value} ETH
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Status:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', color: transactionDetails.status === 'Success' ? '#4caf50' : '#f44336', fontWeight: 'bold' }}>
+                                    {transactionDetails.status === 'Success' ? '✓ Success' : '✗ Failed'}
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Block Number:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', color: '#333' }}>
+                                    {transactionDetails.blockNumber}
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Gas Used:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', color: '#333' }}>
+                                    {transactionDetails.gasUsed} / {transactionDetails.gasLimit}
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Timestamp:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', color: '#333' }}>
+                                    {transactionDetails.timestamp}
+                                  </p>
+                                </div>
+                                
+                                <div style={{ padding: '0.75rem', background: '#fff', borderRadius: '4px' }}>
+                                  <strong style={{ color: '#666', fontSize: '0.85rem' }}>Network:</strong>
+                                  <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', color: '#333' }}>
+                                    {transactionDetails.network} (Local - Free Transactions)
+                                  </p>
+                                </div>
+                              </div>
+                            ) : (
+                              <div style={{ padding: '1rem', background: '#fff', borderRadius: '4px', textAlign: 'center' }}>
+                                <p style={{ color: '#666', marginBottom: '0.5rem' }}>Transaction Hash: {transactionHash}</p>
+                                <button
+                                  onClick={() => fetchTransactionDetails(transactionHash, provider)}
+                                  style={{ padding: '0.5rem 1rem', background: '#667eea', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                >
+                                  Load Transaction Details
+                                </button>
+                              </div>
+                            )}
+                            
+                            <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#e3f2fd', borderRadius: '4px', border: '1px solid #2196f3' }}>
+                              <p style={{ margin: 0, fontSize: '0.85rem', color: '#1976d2' }}>
+                                <strong>ℹ️ Note:</strong> You're on a local Hardhat network. Transactions are <strong>FREE</strong> (no real ETH needed). 
+                                In production on mainnet, you would need real ETH to pay for gas fees (~$5-50 per transaction depending on network congestion).
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      </>
                     )}
 
                     {transferDetails.status === 'Cancelled' && (
@@ -1280,6 +1773,24 @@ function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate
                         <div>
                           <strong>Transfer Cancelled</strong>
                           <p>This transfer has been cancelled by the seller.</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {transferDetails.status === 'Rejected' && (
+                      <div className="rejected-message" style={{ padding: '1rem', background: '#ffebee', border: '2px solid #f44336', borderRadius: '8px', marginTop: '1rem' }}>
+                        <FiXCircle className="cancelled-icon" style={{ color: '#f44336', fontSize: '2rem' }} />
+                        <div>
+                          <strong style={{ color: '#c62828', display: 'block', marginBottom: '0.5rem' }}>Transfer Rejected</strong>
+                          <p style={{ margin: '0.5rem 0', color: '#666' }}>
+                            This transfer has been rejected by {transferDetails.rejectedBy ? `${transferDetails.rejectedBy.substring(0, 10)}...` : 'an authorized party'}.
+                          </p>
+                          {transferDetails.rejectionReason && (
+                            <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#fff', borderRadius: '4px', border: '1px solid #ffcdd2' }}>
+                              <strong style={{ color: '#c62828', display: 'block', marginBottom: '0.25rem' }}>Reason for Rejection:</strong>
+                              <p style={{ margin: 0, color: '#333' }}>{transferDetails.rejectionReason}</p>
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -1328,8 +1839,86 @@ function BuyerAcceptForm({ transferId, onAccept, uploadFile, loading }) {
   );
 }
 
+// Rejection Form Component
+function RejectionForm({ transferId, onReject, loading, role }) {
+  const [showForm, setShowForm] = useState(false);
+  const [reason, setReason] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!reason.trim()) {
+      alert('Please provide a reason for rejection');
+      return;
+    }
+    await onReject(reason.trim());
+    setShowForm(false);
+    setReason('');
+  };
+
+  if (!showForm) {
+    return (
+      <button
+        onClick={() => setShowForm(true)}
+        disabled={loading}
+        className="action-btn reject-btn"
+        style={{ background: '#f44336', color: 'white' }}
+      >
+        ✗ Reject Transfer
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ width: '100%', marginTop: '1rem' }}>
+      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+        <div className="form-group" style={{ margin: 0 }}>
+          <label style={{ color: '#c62828', fontWeight: 'bold' }}>Reason for Rejection *</label>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            required
+            placeholder={`Enter the reason for rejecting this transfer as ${role}...`}
+            rows={4}
+            style={{ 
+              width: '100%', 
+              padding: '0.75rem', 
+              border: '2px solid #f44336', 
+              borderRadius: '4px',
+              fontSize: '0.95rem',
+              fontFamily: 'inherit'
+            }}
+          />
+          <small style={{ color: '#666' }}>Please provide a clear reason for rejection</small>
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button 
+            type="submit" 
+            disabled={loading || !reason.trim()} 
+            className="action-btn reject-btn"
+            style={{ background: '#f44336', color: 'white', flex: 1 }}
+          >
+            {loading ? <><FiClock className="btn-icon" /> Processing...</> : <><FiXCircle className="btn-icon" /> Submit Rejection</>}
+          </button>
+          <button 
+            type="button"
+            onClick={() => {
+              setShowForm(false);
+              setReason('');
+            }}
+            disabled={loading}
+            className="action-btn"
+            style={{ background: '#757575', color: 'white' }}
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 // Register Property Component
-function RegisterProperty({ uploadFile, account, userRole }) {
+function RegisterProperty({ uploadFile, account, userRole, onPropertyRegistered }) {
   const [form, setForm] = useState({
     owner: '',
     propertyAddress: '',
@@ -1379,6 +1968,12 @@ function RegisterProperty({ uploadFile, account, userRole }) {
           area: '', 
           file: null 
         });
+        // Wait a moment for blockchain transaction to be confirmed, then refresh
+        setTimeout(async () => {
+          if (onPropertyRegistered) {
+            await onPropertyRegistered();
+          }
+        }, 1000);
       }
     } catch (error) {
       console.error('Error:', error);

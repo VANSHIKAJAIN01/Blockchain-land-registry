@@ -8,7 +8,9 @@
     "test": "hardhat test",
     "node": "hardhat node",
     "deploy": "hardhat run scripts/deploy.js --network localhost",
-    "setup-roles": "hardhat run scripts/setup-roles.js --network localhost"
+    "setup-roles": "hardhat run scripts/setup-roles.js --network localhost",
+    "fund-account": "hardhat run scripts/fund-account.js --network localhost",
+    "show-accounts": "hardhat run scripts/show-accounts.js --network localhost"
   },
   "keywords": [
     "blockchain",
