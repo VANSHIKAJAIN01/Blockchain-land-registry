@@ -3,6 +3,8 @@ const cors = require('cors');
 const multer = require('multer');
 const { ethers } = require('ethers');
 const PropertyRegistryABI = require('../artifacts/contracts/PropertyRegistry.sol/PropertyRegistry.json');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -76,8 +78,27 @@ async function initializeIPFS() {
 // Initialize IPFS on startup
 initializeIPFS();
 
-// File upload configuration
-const upload = multer({ storage: multer.memoryStorage() });
+// File storage configuration
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Store file hash to filename mapping
+const fileStorage = new Map(); // hash -> { filename, originalName, mimeType }
+
+// Configure multer to store files on disk
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + '-' + file.originalname);
+  }
+});
+
+const upload = multer({ storage: storage });
 
 // Ethereum provider configuration
 let provider;
@@ -162,6 +183,20 @@ function getContractForRole(role) {
   return new ethers.Contract(contractAddress, PropertyRegistryABI.abi, signer);
 }
 
+// Get signer for a specific role (helper function)
+function getSignerForRole(role) {
+  return roleSigners[role] || defaultSigner;
+}
+
+// Get signer address for a specific role (async helper)
+async function getSignerAddressForRole(role) {
+  const signer = getSignerForRole(role);
+  if (!signer) {
+    throw new Error(`No signer available for role: ${role}`);
+  }
+  return await signer.getAddress();
+}
+
 // Initialize on startup
 initializeContract();
 
@@ -176,17 +211,29 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    // Store file information for later retrieval
+    const fileHash = Buffer.from(fs.readFileSync(req.file.path)).toString('hex').substring(0, 42);
+    const mockHash = 'QmMock' + fileHash;
+    
+    // Store file mapping
+    fileStorage.set(mockHash, {
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      path: req.file.path
+    });
+    
     // If IPFS is not available, use mock hash for testing
     if (!useIPFS || !ipfs) {
-      // Generate a mock IPFS hash for testing
-      const mockHash = 'Qm' + Buffer.from(req.file.buffer).toString('base64').substring(0, 42);
       console.log('⚠️  Using mock IPFS hash for testing:', mockHash);
+      console.log('   IPFS not configured - document stored locally and can be viewed via backend.');
       
       return res.json({
         success: true,
         ipfsHash: mockHash,
-        url: `https://ipfs.io/ipfs/${mockHash}`,
-        note: 'Mock hash - IPFS not configured. Install IPFS for real storage.'
+        url: `${req.protocol}://${req.get('host')}/api/documents/${mockHash}`,
+        isMock: true,
+        note: 'Mock hash - IPFS not configured. Document stored locally and can be viewed.'
       });
     }
 
@@ -195,17 +242,28 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       await initializeIPFS();
       if (!ipfs || !useIPFS) {
         // Still use mock hash
-        const mockHash = 'Qm' + Buffer.from(req.file.buffer).toString('base64').substring(0, 42);
+        const fileHash = Buffer.from(fs.readFileSync(req.file.path)).toString('hex').substring(0, 42);
+        const mockHash = 'QmMock' + fileHash;
+        
+        // Store file mapping
+        fileStorage.set(mockHash, {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          path: req.file.path
+        });
+        
         return res.json({
           success: true,
           ipfsHash: mockHash,
-          url: `https://ipfs.io/ipfs/${mockHash}`,
-          note: 'Mock hash - IPFS not configured.'
+          url: `${req.protocol}://${req.get('host')}/api/documents/${mockHash}`,
+          isMock: true,
+          note: 'Mock hash - IPFS not configured. Document stored locally and can be viewed.'
         });
       }
     }
 
-    const fileBuffer = req.file.buffer;
+    const fileBuffer = fs.readFileSync(req.file.path);
     const fileExtension = req.file.originalname.split('.').pop();
     
     // Add file to IPFS
@@ -225,14 +283,26 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     console.error('IPFS upload error:', error);
     
     // Fallback to mock hash if IPFS fails
-    const mockHash = 'Qm' + Buffer.from(req.file.buffer).toString('base64').substring(0, 42);
+    const fileHash = Buffer.from(fs.readFileSync(req.file.path)).toString('hex').substring(0, 42);
+    const mockHash = 'QmMock' + fileHash;
+    
+    // Store file mapping
+    fileStorage.set(mockHash, {
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      path: req.file.path
+    });
+    
     console.log('⚠️  IPFS failed, using mock hash:', mockHash);
+    console.log('   Document stored locally and can be viewed via backend.');
     
     res.json({
       success: true,
       ipfsHash: mockHash,
-      url: `https://ipfs.io/ipfs/${mockHash}`,
-      note: 'Mock hash - IPFS connection failed. Install IPFS for real storage.'
+      url: `${req.protocol}://${req.get('host')}/api/documents/${mockHash}`,
+      isMock: true,
+      note: 'Mock hash - IPFS connection failed. Document stored locally and can be viewed.'
     });
   }
 });
@@ -353,8 +423,8 @@ app.post('/api/transfers/initiate', async (req, res) => {
       console.log('Property owner:', propertyOwner);
       
       // Use Seller signer (should own the property)
+      const signerAddress = await getSignerAddressForRole('seller');
       const contractInstance = getContractForRole('seller');
-      const signerAddress = await contractInstance.signer.getAddress();
       
       console.log('Backend signer:', signerAddress);
       
@@ -467,7 +537,7 @@ app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async
       return res.status(400).json({ error: 'Buyer documents file required' });
     }
 
-    const fileBuffer = req.file.buffer;
+    const fileBuffer = fs.readFileSync(req.file.path);
     const fileExtension = req.file.originalname.split('.').pop();
     let buyerDocumentsHash;
 
@@ -476,7 +546,17 @@ app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async
       await initializeIPFS();
       if (!ipfs || !useIPFS) {
         // Use mock hash for testing
-        buyerDocumentsHash = 'Qm' + Buffer.from(fileBuffer).toString('base64').substring(0, 42);
+        const fileHash = Buffer.from(fileBuffer).toString('hex').substring(0, 42);
+        buyerDocumentsHash = 'QmMock' + fileHash;
+        
+        // Store file mapping
+        fileStorage.set(buyerDocumentsHash, {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          path: req.file.path
+        });
+        
         console.log('⚠️  Using mock IPFS hash for buyer documents:', buyerDocumentsHash);
       } else {
         // IPFS is now available, upload for real
@@ -485,6 +565,14 @@ app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async
           path: `buyer-documents/${Date.now()}.${fileExtension}`
         });
         buyerDocumentsHash = result.cid.toString();
+        
+        // Also store locally
+        fileStorage.set(buyerDocumentsHash, {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          path: req.file.path
+        });
       }
     } else {
       // IPFS is available, upload for real
@@ -493,6 +581,14 @@ app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async
         path: `buyer-documents/${Date.now()}.${fileExtension}`
       });
       buyerDocumentsHash = result.cid.toString();
+      
+      // Also store locally
+      fileStorage.set(buyerDocumentsHash, {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        path: req.file.path
+      });
     }
 
     // Use Buyer signer
@@ -508,6 +604,33 @@ app.post('/api/transfers/:transferId/buyer-accept', upload.single('file'), async
   } catch (error) {
     console.error('Buyer accept error:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Serve document by hash
+ */
+app.get('/api/documents/:hash', (req, res) => {
+  try {
+    const { hash } = req.params;
+    
+    // Check if file exists in storage
+    const fileInfo = fileStorage.get(hash);
+    
+    if (!fileInfo || !fs.existsSync(fileInfo.path)) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    
+    // Set appropriate headers
+    res.setHeader('Content-Type', fileInfo.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${fileInfo.originalName}"`);
+    
+    // Send file
+    const fileStream = fs.createReadStream(fileInfo.path);
+    fileStream.pipe(res);
+  } catch (error) {
+    console.error('Error serving document:', error);
+    res.status(500).json({ error: 'Error serving document' });
   }
 });
 
@@ -619,15 +742,40 @@ app.get('/api/properties/:propertyId/history', async (req, res) => {
 });
 
 /**
- * Get user properties
+ * Get user properties (filtered by current owner)
  */
 app.get('/api/users/:address/properties', async (req, res) => {
   try {
     const { address } = req.params;
-    const propertyIds = await contract.getUserProperties(address);
+    
+    // Normalize address
+    let normalizedAddress;
+    try {
+      normalizedAddress = ethers.getAddress(address);
+    } catch (error) {
+      return res.status(400).json({ error: 'Invalid address format' });
+    }
+    
+    // Get all property IDs associated with this user
+    const propertyIds = await contract.getUserProperties(normalizedAddress);
+    
+    // Filter to only include properties where user is current owner
+    const ownedPropertyIds = [];
+    for (const id of propertyIds) {
+      try {
+        const property = await contract.getProperty(id);
+        // Check if user is still the current owner
+        if (property.currentOwner.toLowerCase() === normalizedAddress.toLowerCase()) {
+          ownedPropertyIds.push(id.toString());
+        }
+      } catch (error) {
+        console.warn(`Error checking property ${id}:`, error.message);
+        // Skip this property if there's an error
+      }
+    }
 
     res.json({
-      properties: propertyIds.map(id => id.toString())
+      properties: ownedPropertyIds
     });
   } catch (error) {
     console.error('Get user properties error:', error);

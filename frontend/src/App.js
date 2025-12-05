@@ -88,24 +88,12 @@ const ROLE_INFO = {
     ],
     permissions: 'Can verify transfers assigned to you'
   },
-  'None': {
-    icon: '👁️',
-    color: '#666',
-    description: 'Viewer',
-    responsibilities: [
-      'View public property information',
-      'Search properties by ID',
-      'Register properties for yourself',
-      'Initiate transfers for your properties'
-    ],
-    permissions: 'Limited access - can register and transfer own properties'
-  }
 };
 
 function App() {
   const [account, setAccount] = useState('');
   const [provider, setProvider] = useState(null);
-  const [userRole, setUserRole] = useState('None');
+  const [userRole, setUserRole] = useState('');
   const [properties, setProperties] = useState([]);
   const [transfers, setTransfers] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -144,8 +132,8 @@ function App() {
       setUserRole(data.role);
     } catch (error) {
       console.error('Error loading role:', error);
-      // Set default role if API fails
-      setUserRole('None');
+      // Set empty role if API fails
+      setUserRole('');
       alert('Warning: Could not load user role. Make sure backend is running on port 3001.');
     }
   };
@@ -163,7 +151,11 @@ function App() {
           fetch(`${API_URL}/properties/${id}`).then(r => r.json())
         );
         const propertyData = await Promise.all(propertyPromises);
-        setProperties(propertyData);
+        // Double-check: filter by current owner (in case backend didn't filter)
+        const filteredProperties = propertyData.filter(prop => 
+          prop.currentOwner.toLowerCase() === address.toLowerCase()
+        );
+        setProperties(filteredProperties);
       } else {
         setProperties([]);
       }
@@ -176,16 +168,30 @@ function App() {
 
   // File upload handler
   const uploadFile = async (file) => {
-    const formData = new FormData();
-    formData.append('file', file);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
 
-    const response = await fetch(`${API_URL}/upload`, {
-      method: 'POST',
-      body: formData
-    });
+      const response = await fetch(`${API_URL}/upload`, {
+        method: 'POST',
+        body: formData
+      });
 
-    const data = await response.json();
-    return data.ipfsHash;
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.success) {
+        throw new Error(data.error || 'Upload failed');
+      }
+
+      return data.ipfsHash;
+    } catch (error) {
+      console.error('File upload error:', error);
+      throw error;
+    }
   };
 
   const [copied, setCopied] = useState(false);
@@ -225,9 +231,9 @@ function App() {
                 </div>
               </div>
               <div className="role-section">
-                <div className="role-badge-header" style={{ backgroundColor: ROLE_INFO[userRole]?.color || '#666' }}>
-                  <span className="role-icon-header">{ROLE_INFO[userRole]?.icon || '👁️'}</span>
-                  <span className="role-text">{userRole}</span>
+                <div className="role-badge-header" style={{ backgroundColor: ROLE_INFO[userRole]?.color || '#999' }}>
+                  <span className="role-icon-header">{ROLE_INFO[userRole]?.icon || '👤'}</span>
+                  <span className="role-text">{userRole || 'No Role'}</span>
                 </div>
               </div>
             </div>
@@ -264,7 +270,7 @@ function App() {
               <FiRefreshCw className="tab-icon" />
               <span>Transfers</span>
             </button>
-            {(userRole === 'Registrar' || userRole === 'Seller' || userRole === 'Admin' || userRole === 'None') && (
+            {(userRole === 'Registrar' || userRole === 'Seller' || userRole === 'Admin') && (
               <button
                 className={activeTab === 'register' ? 'active' : ''}
                 onClick={() => setActiveTab('register')}
@@ -308,9 +314,10 @@ function App() {
                 userRole={userRole}
                 uploadFile={uploadFile}
                 provider={provider}
+                onPropertiesUpdate={() => loadUserProperties(account)}
               />
             )}
-            {activeTab === 'register' && (userRole === 'Registrar' || userRole === 'Seller' || userRole === 'None') && (
+            {activeTab === 'register' && (userRole === 'Registrar' || userRole === 'Seller') && (
               <RegisterProperty uploadFile={uploadFile} account={account} userRole={userRole} />
             )}
           </main>
@@ -322,7 +329,13 @@ function App() {
 
 // Role Info Panel Component
 function RoleInfoPanel({ userRole, onClose }) {
-  const currentRoleInfo = ROLE_INFO[userRole] || ROLE_INFO['None'];
+  const currentRoleInfo = ROLE_INFO[userRole] || { 
+    icon: '👤', 
+    color: '#999', 
+    description: 'No Role Assigned', 
+    responsibilities: ['View public property information', 'Search properties by ID'],
+    permissions: 'Limited access - contact admin to assign a role'
+  };
   
   return (
     <div className="role-info-panel">
@@ -337,7 +350,7 @@ function RoleInfoPanel({ userRole, onClose }) {
           <div className="role-badge-large" style={{ backgroundColor: currentRoleInfo.color }}>
             <span className="role-icon">{currentRoleInfo.icon}</span>
             <div>
-              <h4>{userRole}</h4>
+              <h4>{userRole || 'No Role'}</h4>
               <p>{currentRoleInfo.description}</p>
             </div>
           </div>
@@ -428,7 +441,11 @@ function RoleInfoPanel({ userRole, onClose }) {
 
 // Dashboard Component
 function Dashboard({ account, userRole, properties }) {
-  const roleInfo = ROLE_INFO[userRole] || ROLE_INFO['None'];
+  const roleInfo = ROLE_INFO[userRole] || { 
+    icon: '👤', 
+    color: '#999', 
+    description: 'No Role Assigned'
+  };
   
   return (
     <div className="dashboard">
@@ -436,7 +453,7 @@ function Dashboard({ account, userRole, properties }) {
         <h2><FiLayers className="section-icon" /> Dashboard</h2>
         <div className="role-badge" style={{ backgroundColor: roleInfo.color }}>
           <span>{roleInfo.icon}</span>
-          <span>{userRole}</span>
+          <span>{userRole || 'No Role'}</span>
         </div>
       </div>
       
@@ -450,7 +467,7 @@ function Dashboard({ account, userRole, properties }) {
         <div className="stat-card" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
           <FiUser className="stat-icon" />
           <h3>My Role</h3>
-          <p className="stat-value">{userRole}</p>
+          <p className="stat-value">{userRole || 'No Role'}</p>
           <p className="stat-label">{roleInfo.description}</p>
         </div>
         <div className="stat-card" style={{ background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' }}>
@@ -464,14 +481,14 @@ function Dashboard({ account, userRole, properties }) {
       <div className="dashboard-quick-actions">
         <h3>Quick Actions</h3>
         <div className="quick-actions-grid">
-          {(userRole === 'Registrar' || userRole === 'Seller' || userRole === 'None') && (
+          {(userRole === 'Registrar' || userRole === 'Seller') && (
             <div className="quick-action-card">
               <FiPlus className="action-icon" />
               <h4>Register Property</h4>
               <p>Add a new property to the registry</p>
             </div>
           )}
-          {(userRole === 'Seller' || userRole === 'None') && (
+          {userRole === 'Seller' && (
             <div className="quick-action-card">
               <FiRefreshCw className="action-icon" />
               <h4>Initiate Transfer</h4>
@@ -571,12 +588,19 @@ function Properties({ properties, account, userRole }) {
             </div>
             {searchedProperty.ipfsHash && (
               <a
-                href={`https://ipfs.io/ipfs/${searchedProperty.ipfsHash}`}
+                href={searchedProperty.ipfsHash.startsWith('QmMock') 
+                  ? `${API_URL}/documents/${searchedProperty.ipfsHash}`
+                  : `https://ipfs.io/ipfs/${searchedProperty.ipfsHash}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="document-link"
               >
-                <FiFileText className="btn-icon" /> View Documents on IPFS
+                <FiFileText className="btn-icon" /> View Documents
+                {searchedProperty.ipfsHash.startsWith('QmMock') && (
+                  <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
+                    (Stored locally - IPFS not configured)
+                  </small>
+                )}
               </a>
             )}
           </div>
@@ -616,12 +640,19 @@ function Properties({ properties, account, userRole }) {
                 </div>
                 {property.ipfsHash && (
                   <a
-                    href={`https://ipfs.io/ipfs/${property.ipfsHash}`}
+                    href={property.ipfsHash.startsWith('QmMock') 
+                      ? `${API_URL}/documents/${property.ipfsHash}`
+                      : `https://ipfs.io/ipfs/${property.ipfsHash}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="document-link"
                   >
                     <FiFileText className="btn-icon" /> View Documents
+                    {property.ipfsHash.startsWith('QmMock') && (
+                      <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
+                        (Stored locally - IPFS not configured)
+                      </small>
+                    )}
                   </a>
                 )}
               </div>
@@ -634,7 +665,7 @@ function Properties({ properties, account, userRole }) {
 }
 
 // Transfers Component
-function Transfers({ account, userRole, uploadFile, provider }) {
+function Transfers({ account, userRole, uploadFile, provider, onPropertiesUpdate }) {
   const [transferForm, setTransferForm] = useState({
     propertyId: '',
     buyer: '',
@@ -810,6 +841,10 @@ function Transfers({ account, userRole, uploadFile, provider }) {
       if (transferDetails) {
         await loadTransferDetails(transferId);
       }
+      // Reload properties if transfer was completed (ownership changed)
+      if (action === 'buyerAccept' && onPropertiesUpdate) {
+        await onPropertiesUpdate();
+      }
     } catch (error) {
       console.error('Error:', error);
       let errorMessage = error.message || 'Unknown error';
@@ -880,6 +915,10 @@ function Transfers({ account, userRole, uploadFile, provider }) {
         if (transferDetails) {
           await loadTransferDetails(transferId);
         }
+        // Reload properties if transfer was completed (ownership changed)
+        if (action === 'buyerAccept' && onPropertiesUpdate) {
+          await onPropertiesUpdate();
+        }
       } else {
         alert('❌ Error: ' + (data.error || 'Unknown error'));
       }
@@ -932,7 +971,7 @@ function Transfers({ account, userRole, uploadFile, provider }) {
           </div>
 
           {/* Initiate Transfer Form */}
-          {(userRole === 'Seller' || userRole === 'None') && (
+          {userRole === 'Seller' && (
             <div className="transfer-section">
               <h3><FiRefreshCw className="section-icon" /> Initiate New Transfer</h3>
               <p className="help-text">As a Seller, you can initiate a property transfer. Upload the property deed and enter buyer details.</p>
@@ -1068,26 +1107,47 @@ function Transfers({ account, userRole, uploadFile, provider }) {
                     {transferDetails.documentsHash && (
                       <div className="document-item">
                         <p><strong><FiFileText className="inline-icon" /> Seller Documents:</strong></p>
-                        <a
-                          href={`https://ipfs.io/ipfs/${transferDetails.documentsHash}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="document-link"
-                        >
-                          <FiFileText className="btn-icon" /> View Seller Documents on IPFS
-                        </a>
+                        {transferDetails.documentsHash.startsWith('QmMock') ? (
+                          <a
+                            href={`${API_URL}/documents/${transferDetails.documentsHash}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="document-link"
+                          >
+                            <FiFileText className="btn-icon" /> View Seller Documents
+                            <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
+                              (Stored locally - IPFS not configured)
+                            </small>
+                          </a>
+                        ) : (
+                          <a
+                            href={`https://ipfs.io/ipfs/${transferDetails.documentsHash}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="document-link"
+                          >
+                            <FiFileText className="btn-icon" /> View Seller Documents on IPFS
+                          </a>
+                        )}
                       </div>
                     )}
                     {transferDetails.buyerDocumentsHash && (
                       <div className="document-item">
                         <p><strong><FiFileText className="inline-icon" /> Buyer Documents:</strong></p>
                         <a
-                          href={`https://ipfs.io/ipfs/${transferDetails.buyerDocumentsHash}`}
+                          href={transferDetails.buyerDocumentsHash.startsWith('QmMock') 
+                            ? `${API_URL}/documents/${transferDetails.buyerDocumentsHash}`
+                            : `https://ipfs.io/ipfs/${transferDetails.buyerDocumentsHash}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="document-link"
                         >
-                          <FiFileText className="btn-icon" /> View Buyer Documents on IPFS
+                          <FiFileText className="btn-icon" /> View Buyer Documents
+                          {transferDetails.buyerDocumentsHash.startsWith('QmMock') && (
+                            <small style={{ display: 'block', marginTop: '5px', fontSize: '0.85em', opacity: 0.8 }}>
+                              (Stored locally - IPFS not configured)
+                            </small>
+                          )}
                         </a>
                       </div>
                     )}
@@ -1188,7 +1248,7 @@ function Transfers({ account, userRole, uploadFile, provider }) {
                       </div>
                     )}
                     
-                    {(userRole === 'Seller' || userRole === 'None') && 
+                    {userRole === 'Seller' && 
                      transferDetails.seller.toLowerCase() === account.toLowerCase() &&
                      transferDetails.status !== 'Completed' &&
                      transferDetails.status !== 'Cancelled' && (
@@ -1281,7 +1341,7 @@ function RegisterProperty({ uploadFile, account, userRole }) {
 
   // Auto-fill owner address for sellers
   useEffect(() => {
-    if ((userRole === 'Seller' || userRole === 'None') && account) {
+    if (userRole === 'Seller' && account) {
       // Sellers can only register for themselves
       setForm(prev => ({ ...prev, owner: account }));
     }
@@ -1295,7 +1355,7 @@ function RegisterProperty({ uploadFile, account, userRole }) {
       const ipfsHash = await uploadFile(form.file);
 
       // For sellers, ensure owner is their own address
-      const ownerAddress = (userRole === 'Seller' || userRole === 'None') ? account : form.owner;
+      const ownerAddress = (userRole === 'Seller') ? account : form.owner;
 
       const response = await fetch(`${API_URL}/properties/register`, {
         method: 'POST',
@@ -1313,7 +1373,7 @@ function RegisterProperty({ uploadFile, account, userRole }) {
       if (data.success) {
         alert('Property registered successfully! Property ID: ' + (data.propertyId || 'N/A'));
         setForm({ 
-          owner: (userRole === 'Seller' || userRole === 'None') ? account : '', 
+          owner: (userRole === 'Seller') ? account : '', 
           propertyAddress: '', 
           propertyType: 'Residential', 
           area: '', 
@@ -1331,11 +1391,11 @@ function RegisterProperty({ uploadFile, account, userRole }) {
   return (
     <div className="register-property">
       <h2><FiPlus className="section-icon" /> Register New Property</h2>
-      {(userRole === 'Seller' || userRole === 'None') && (
+      {userRole === 'Seller' && (
         <div className="info-banner">
           <FiInfo className="info-icon" />
           <div>
-            <strong>As a {userRole === 'Seller' ? 'Seller' : 'user'},</strong> you can register properties for yourself. 
+            <strong>As a Seller,</strong> you can register properties for yourself. 
             Owner address is automatically set to your wallet address.
           </div>
         </div>
